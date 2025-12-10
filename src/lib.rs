@@ -1,6 +1,7 @@
 #![no_std]
 
 extern crate alloc;
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::{String, ToString};
@@ -11,7 +12,7 @@ use core::ops::Deref;
 // Optimized Value Type - Symbols use String
 // ============================================================================
 
-pub type BuiltinFn = fn(&ValRef) -> Result<ValRef, ValRef>;
+pub type BuiltinFn = fn(&ValRef, Cont) -> Result<Bounce, ValRef>;
 
 #[derive(Clone)]
 pub enum Value {
@@ -26,6 +27,7 @@ pub enum Value {
         body: ValRef,
         env: ValRef,
     },
+    Continuation(Cont),
     Nil,
 }
 
@@ -40,18 +42,40 @@ impl core::fmt::Debug for Value {
             Value::Cons(_) => write!(f, "Cons(...)"),
             Value::Builtin(_) => write!(f, "Builtin(<fn>)"),
             Value::Lambda { .. } => write!(f, "Lambda(<fn>)"),
+            Value::Continuation(_) => write!(f, "Continuation(<k>)"),
             Value::Nil => write!(f, "()"),
         }
     }
 }
 
 // ============================================================================
-// Trampoline System for Proper TCO
+// Trampoline for Tail Call Optimization
 // ============================================================================
 
-pub enum EvalResult {
+pub enum Bounce {
     Done(ValRef),
-    TailCall(ValRef, ValRef),
+    Continue(Box<dyn FnOnce() -> Result<Bounce, ValRef>>),
+}
+
+pub type Cont = Rc<dyn Fn(ValRef) -> Result<Bounce, ValRef>>;
+
+fn trampoline(mut bounce: Bounce) -> Result<ValRef, ValRef> {
+    loop {
+        match bounce {
+            Bounce::Done(val) => return Ok(val),
+            Bounce::Continue(thunk) => {
+                bounce = thunk()?;
+            }
+        }
+    }
+}
+
+fn halt_cont(result: &Rc<RefCell<Option<Result<ValRef, ValRef>>>>) -> Cont {
+    let result = result.clone();
+    Rc::new(move |val: ValRef| {
+        *result.borrow_mut() = Some(Ok(val.clone()));
+        Ok(Bounce::Done(val))
+    })
 }
 
 // ============================================================================
@@ -98,6 +122,10 @@ impl ValRef {
         Self::new(Value::Lambda { params, body, env })
     }
 
+    pub fn continuation(cont: Cont) -> Self {
+        Self::new(Value::Continuation(cont))
+    }
+
     pub fn nil() -> Self {
         Self::new(Value::Nil)
     }
@@ -139,6 +167,7 @@ impl Value {
             Value::Cons(_) => "cons",
             Value::Builtin(_) => "builtin",
             Value::Lambda { .. } => "lambda",
+            Value::Continuation(_) => "continuation",
             Value::Nil => "empty-list",
         }
     }
@@ -192,8 +221,18 @@ impl Value {
         }
     }
 
+    pub fn as_continuation(&self) -> Option<&Cont> {
+        match self {
+            Value::Continuation(cont) => Some(cont),
+            _ => None,
+        }
+    }
+
     pub fn is_callable(&self) -> bool {
-        matches!(self, Value::Builtin(_) | Value::Lambda { .. })
+        matches!(
+            self,
+            Value::Builtin(_) | Value::Lambda { .. } | Value::Continuation(_)
+        )
     }
 
     pub fn is_nil(&self) -> bool {
@@ -213,6 +252,7 @@ impl Value {
             Value::Cons(_) => self.list_to_display_str(),
             Value::Builtin(_) => Ok(String::from("<builtin>")),
             Value::Lambda { .. } => Ok(String::from("<lambda>")),
+            Value::Continuation(_) => Ok(String::from("<continuation>")),
             Value::Nil => Ok(String::from("()")),
         }
     }
@@ -249,7 +289,7 @@ impl Value {
         Ok(result)
     }
 
-    fn list_len(&self) -> usize {
+    pub fn list_len(&self) -> usize {
         let mut count = 0;
         let mut current = ValRef::new(self.clone());
 
@@ -268,7 +308,7 @@ impl Value {
         count
     }
 
-    fn list_nth(&self, n: usize) -> Option<ValRef> {
+    pub fn list_nth(&self, n: usize) -> Option<ValRef> {
         let mut current = ValRef::new(self.clone());
         let mut idx = 0;
 
@@ -402,6 +442,16 @@ fn register_builtins(env: &ValRef) {
         env,
         String::from("reverse"),
         ValRef::builtin(builtin_reverse),
+    );
+    env_set(
+        env,
+        String::from("call/cc"),
+        ValRef::builtin(builtin_call_cc),
+    );
+    env_set(
+        env,
+        String::from("call-with-current-continuation"),
+        ValRef::builtin(builtin_call_cc),
     );
 }
 
@@ -640,281 +690,436 @@ pub fn parse_multiple(input: &str) -> Result<ValRef, ValRef> {
 }
 
 // ============================================================================
-// Evaluator
+// CPS Evaluator with Trampoline
 // ============================================================================
 
-fn eval_step(expr: ValRef, env: &ValRef) -> Result<EvalResult, ValRef> {
+pub fn eval(expr: ValRef, env: &ValRef, cont: Cont) -> Result<Bounce, ValRef> {
     match expr.as_ref() {
         Value::Number(_)
         | Value::Bool(_)
         | Value::Char(_)
         | Value::Builtin(_)
-        | Value::Lambda { .. } => Ok(EvalResult::Done(expr.clone())),
-        Value::Symbol(s) => env_get(env, s)
-            .map(EvalResult::Done)
-            .ok_or_else(|| ValRef::symbol(String::from("Unbound symbol"))),
-        Value::Cons(cell) => {
-            let (car, cdr) = cell.borrow().clone();
+        | Value::Lambda { .. }
+        | Value::Continuation(_) => cont(expr.clone()),
+
+        Value::Symbol(s) => {
+            if let Some(val) = env_get(env, s) {
+                cont(val)
+            } else {
+                Err(ValRef::symbol(String::from("Unbound symbol")))
+            }
+        }
+
+        Value::Cons(_) => {
+            let (car, _cdr) = expr.as_cons().unwrap().borrow().clone();
             if let Value::Symbol(sym) = car.as_ref() {
                 match sym.as_str() {
-                    "define" => {
-                        let len = expr.as_ref().list_len();
-                        if len != 3 {
-                            return Err(ValRef::symbol(String::from(
-                                "define requires 2 arguments",
-                            )));
-                        }
-                        let name_val = expr
-                            .as_ref()
-                            .list_nth(1)
-                            .ok_or(ValRef::symbol(String::from("define missing name")))?;
-                        let name = name_val
-                            .as_symbol()
-                            .ok_or(ValRef::symbol(String::from(
-                                "define requires symbol as first arg",
-                            )))?
-                            .clone();
-                        let body_val = expr
-                            .as_ref()
-                            .list_nth(2)
-                            .ok_or(ValRef::symbol(String::from("define missing body")))?;
-                        let val = eval(body_val, env)?;
-                        env_set(env, name, val.clone());
-                        return Ok(EvalResult::Done(val));
+                    "define" => eval_define(expr.clone(), env, cont),
+                    "set!" => eval_set(expr.clone(), env, cont),
+                    "lambda" => eval_lambda(expr.clone(), env, cont),
+                    "begin" => eval_begin(expr.clone(), env, cont),
+                    "if" => eval_if(expr.clone(), env, cont),
+                    "quote" => eval_quote(expr.clone(), cont),
+                    "call/cc" | "call-with-current-continuation" => {
+                        eval_call_cc(expr.clone(), env, cont)
                     }
-                    "set!" => {
-                        let len = expr.as_ref().list_len();
-                        if len != 3 {
-                            return Err(ValRef::symbol(String::from("set! requires 2 arguments")));
-                        }
-                        let name_val = expr
-                            .as_ref()
-                            .list_nth(1)
-                            .ok_or(ValRef::symbol(String::from("set! missing name")))?;
-                        let name = name_val.as_symbol().ok_or(ValRef::symbol(String::from(
-                            "set! requires symbol as first arg",
-                        )))?;
-                        let body_val = expr
-                            .as_ref()
-                            .list_nth(2)
-                            .ok_or(ValRef::symbol(String::from("set! missing value")))?;
-                        let val = eval(body_val, env)?;
-                        env_set_existing(env, name, val.clone())
-                            .map_err(|_| ValRef::symbol(String::from("set! unbound variable")))?;
-                        return Ok(EvalResult::Done(val));
-                    }
-
-                    "lambda" => {
-                        let len = expr.as_ref().list_len();
-                        if len < 3 {
-                            return Err(ValRef::symbol(String::from(
-                                "lambda requires at least 2 arguments (params body)",
-                            )));
-                        }
-
-                        let params_list = expr
-                            .as_ref()
-                            .list_nth(1)
-                            .ok_or(ValRef::symbol(String::from("lambda missing params")))?;
-
-                        let mut current = params_list.clone();
-                        loop {
-                            match current.as_ref() {
-                                Value::Cons(param_cell) => {
-                                    let (param, rest) = param_cell.borrow().clone();
-                                    if param.as_symbol().is_none() {
-                                        return Err(ValRef::symbol(String::from(
-                                            "lambda params must be symbols",
-                                        )));
-                                    }
-                                    current = rest;
-                                }
-                                Value::Nil => break,
-                                _ => {
-                                    return Err(ValRef::symbol(String::from(
-                                        "lambda params must be a list",
-                                    )));
-                                }
-                            }
-                        }
-
-                        // Collect all body expressions
-                        let mut body_exprs = ValRef::nil();
-                        for i in (2..len).rev() {
-                            let expr_i = expr
-                                .as_ref()
-                                .list_nth(i)
-                                .ok_or(ValRef::symbol(String::from("lambda missing body expr")))?;
-                            body_exprs = ValRef::cons(expr_i, body_exprs);
-                        }
-
-                        // If multiple body expressions, wrap in begin
-                        let body = if len == 3 {
-                            expr.as_ref()
-                                .list_nth(2)
-                                .ok_or(ValRef::symbol(String::from("lambda missing body")))?
-                        } else {
-                            // Create (begin expr1 expr2 ...)
-                            ValRef::cons(ValRef::symbol(String::from("begin")), body_exprs)
-                        };
-
-                        return Ok(EvalResult::Done(ValRef::lambda(
-                            params_list,
-                            body,
-                            env.clone(),
-                        )));
-                    }
-                    "begin" => {
-                        let len = expr.as_ref().list_len();
-                        if len < 2 {
-                            return Err(ValRef::symbol(String::from(
-                                "begin requires at least 1 argument",
-                            )));
-                        }
-
-                        // Evaluate all expressions in sequence, return last
-                        let mut result = ValRef::nil();
-                        for i in 1..len {
-                            let expr_i = expr
-                                .as_ref()
-                                .list_nth(i)
-                                .ok_or(ValRef::symbol(String::from("begin missing expr")))?;
-
-                            // For the last expression, use tail call
-                            if i == len - 1 {
-                                return Ok(EvalResult::TailCall(expr_i, env.clone()));
-                            } else {
-                                result = eval(expr_i, env)?;
-                            }
-                        }
-
-                        return Ok(EvalResult::Done(result));
-                    }
-
-                    "if" => {
-                        let len = expr.as_ref().list_len();
-                        if len != 4 {
-                            return Err(ValRef::symbol(String::from("if requires 3 arguments")));
-                        }
-                        let cond_expr = expr
-                            .as_ref()
-                            .list_nth(1)
-                            .ok_or(ValRef::symbol(String::from("if missing condition")))?;
-                        let cond = eval(cond_expr, env)?;
-                        let is_true = match cond.as_ref() {
-                            Value::Bool(b) => *b,
-                            Value::Nil => false,
-                            _ => true,
-                        };
-                        let branch_idx = if is_true { 2 } else { 3 };
-                        let branch = expr
-                            .as_ref()
-                            .list_nth(branch_idx)
-                            .ok_or(ValRef::symbol(String::from("if missing branch")))?;
-                        return Ok(EvalResult::TailCall(branch, env.clone()));
-                    }
-                    "quote" => {
-                        let len = expr.as_ref().list_len();
-                        if len != 2 {
-                            return Err(ValRef::symbol(String::from("quote requires 1 argument")));
-                        }
-                        let quoted = expr
-                            .as_ref()
-                            .list_nth(1)
-                            .ok_or(ValRef::symbol(String::from("quote missing argument")))?;
-                        return Ok(EvalResult::Done(quoted));
-                    }
-                    _ => {}
+                    _ => eval_application(expr.clone(), env, cont),
                 }
-            }
-
-            let func = eval(car, env)?;
-
-            let mut args = ValRef::nil();
-            let mut current = cdr;
-            loop {
-                match current.as_ref() {
-                    Value::Cons(arg_cell) => {
-                        let (arg_car, arg_cdr) = arg_cell.borrow().clone();
-                        let evaled = eval(arg_car, env)?;
-                        args = ValRef::cons(evaled, args);
-                        current = arg_cdr;
-                    }
-                    Value::Nil => break,
-                    _ => return Err(ValRef::symbol(String::from("Malformed argument list"))),
-                }
-            }
-            args = reverse_list(args);
-
-            match func.as_ref() {
-                Value::Builtin(f) => Ok(EvalResult::Done(f(&args)?)),
-                Value::Lambda {
-                    params,
-                    body,
-                    env: lambda_env,
-                } => {
-                    let param_count = params.as_ref().list_len();
-                    let arg_count = args.as_ref().list_len();
-
-                    if arg_count != param_count {
-                        return Err(ValRef::symbol(String::from(
-                            "Lambda argument count mismatch",
-                        )));
-                    }
-
-                    let call_env = env_with_parent(lambda_env.clone());
-
-                    let mut param_cur = params.clone();
-                    let mut arg_cur = args.clone();
-
-                    loop {
-                        match (param_cur.as_ref(), arg_cur.as_ref()) {
-                            (Value::Cons(p_cell), Value::Cons(a_cell)) => {
-                                let (p_car, p_cdr) = p_cell.borrow().clone();
-                                let (a_car, a_cdr) = a_cell.borrow().clone();
-                                if let Value::Symbol(param_name) = p_car.as_ref() {
-                                    env_set(&call_env, param_name.clone(), a_car);
-                                }
-                                param_cur = p_cdr;
-                                arg_cur = a_cdr;
-                            }
-                            (Value::Nil, Value::Nil) => break,
-                            _ => {
-                                return Err(ValRef::symbol(String::from(
-                                    "Parameter/argument mismatch",
-                                )));
-                            }
-                        }
-                    }
-
-                    Ok(EvalResult::TailCall(body.clone(), call_env))
-                }
-                _ => Err(ValRef::symbol(String::from("Cannot call non-function"))),
+            } else {
+                eval_application(expr.clone(), env, cont)
             }
         }
-        Value::Nil => Ok(EvalResult::Done(ValRef::nil())),
+
+        Value::Nil => cont(ValRef::nil()),
     }
 }
 
-pub fn eval(mut expr: ValRef, env: &ValRef) -> Result<ValRef, ValRef> {
-    let mut current_env = env.clone();
+fn eval_define(expr: ValRef, env: &ValRef, cont: Cont) -> Result<Bounce, ValRef> {
+    let len = expr.as_ref().list_len();
+    if len != 3 {
+        return Err(ValRef::symbol(String::from("define requires 2 arguments")));
+    }
 
+    let name_val = expr
+        .as_ref()
+        .list_nth(1)
+        .ok_or(ValRef::symbol(String::from("define missing name")))?;
+    let name = name_val
+        .as_symbol()
+        .ok_or(ValRef::symbol(String::from(
+            "define requires symbol as first arg",
+        )))?
+        .clone();
+    let body_val = expr
+        .as_ref()
+        .list_nth(2)
+        .ok_or(ValRef::symbol(String::from("define missing body")))?;
+
+    let env_clone = env.clone();
+    let cont_clone = cont.clone();
+    let define_cont = Rc::new(move |val: ValRef| {
+        env_set(&env_clone, name.clone(), val.clone());
+        let val_clone = val.clone();
+        let cont_clone2 = cont_clone.clone();
+        Ok(Bounce::Continue(Box::new(move || cont_clone2(val_clone))))
+    });
+
+    eval(body_val, env, define_cont)
+}
+
+fn eval_set(expr: ValRef, env: &ValRef, cont: Cont) -> Result<Bounce, ValRef> {
+    let len = expr.as_ref().list_len();
+    if len != 3 {
+        return Err(ValRef::symbol(String::from("set! requires 2 arguments")));
+    }
+
+    let name_val = expr
+        .as_ref()
+        .list_nth(1)
+        .ok_or(ValRef::symbol(String::from("set! missing name")))?;
+    let name = name_val
+        .as_symbol()
+        .ok_or(ValRef::symbol(String::from(
+            "set! requires symbol as first arg",
+        )))?
+        .clone();
+    let body_val = expr
+        .as_ref()
+        .list_nth(2)
+        .ok_or(ValRef::symbol(String::from("set! missing value")))?;
+
+    let env_clone = env.clone();
+    let cont_clone = cont.clone();
+    let set_cont = Rc::new(move |val: ValRef| {
+        env_set_existing(&env_clone, &name, val.clone())
+            .map_err(|_| ValRef::symbol(String::from("set! unbound variable")))?;
+        let val_clone = val.clone();
+        let cont_clone2 = cont_clone.clone();
+        Ok(Bounce::Continue(Box::new(move || cont_clone2(val_clone))))
+    });
+
+    eval(body_val, env, set_cont)
+}
+
+fn eval_lambda(expr: ValRef, env: &ValRef, cont: Cont) -> Result<Bounce, ValRef> {
+    let len = expr.as_ref().list_len();
+    if len < 3 {
+        return Err(ValRef::symbol(String::from(
+            "lambda requires at least 2 arguments (params body)",
+        )));
+    }
+
+    let params_list = expr
+        .as_ref()
+        .list_nth(1)
+        .ok_or(ValRef::symbol(String::from("lambda missing params")))?;
+
+    let mut current = params_list.clone();
     loop {
-        match eval_step(expr, &current_env)? {
-            EvalResult::Done(val) => return Ok(val),
-            EvalResult::TailCall(new_expr, new_env) => {
-                expr = new_expr;
-                current_env = new_env;
+        match current.as_ref() {
+            Value::Cons(param_cell) => {
+                let (param, rest) = param_cell.borrow().clone();
+                if param.as_symbol().is_none() {
+                    return Err(ValRef::symbol(String::from(
+                        "lambda params must be symbols",
+                    )));
+                }
+                current = rest;
+            }
+            Value::Nil => break,
+            _ => {
+                return Err(ValRef::symbol(String::from("lambda params must be a list")));
             }
         }
+    }
+
+    let body = if len == 3 {
+        expr.as_ref()
+            .list_nth(2)
+            .ok_or(ValRef::symbol(String::from("lambda missing body")))?
+    } else {
+        let mut body_exprs = ValRef::nil();
+        for i in (2..len).rev() {
+            let expr_i = expr
+                .as_ref()
+                .list_nth(i)
+                .ok_or(ValRef::symbol(String::from("lambda missing body expr")))?;
+            body_exprs = ValRef::cons(expr_i, body_exprs);
+        }
+        ValRef::cons(ValRef::symbol(String::from("begin")), body_exprs)
+    };
+
+    cont(ValRef::lambda(params_list, body, env.clone()))
+}
+
+fn eval_begin(expr: ValRef, env: &ValRef, cont: Cont) -> Result<Bounce, ValRef> {
+    let len = expr.as_ref().list_len();
+    if len < 2 {
+        return Err(ValRef::symbol(String::from(
+            "begin requires at least 1 argument",
+        )));
+    }
+
+    eval_sequence(expr.clone(), 1, len, env, cont)
+}
+
+fn eval_sequence(
+    expr: ValRef,
+    idx: usize,
+    len: usize,
+    env: &ValRef,
+    cont: Cont,
+) -> Result<Bounce, ValRef> {
+    if idx >= len {
+        return cont(ValRef::nil());
+    }
+
+    let expr_i = expr
+        .as_ref()
+        .list_nth(idx)
+        .ok_or(ValRef::symbol(String::from("sequence missing expr")))?;
+
+    if idx == len - 1 {
+        // Last expression - tail call
+        eval(expr_i, env, cont)
+    } else {
+        // Not last - evaluate and continue
+        let expr_clone = expr.clone();
+        let env_clone = env.clone();
+        let cont_clone = cont.clone();
+        let seq_cont = Rc::new(move |_: ValRef| {
+            let expr_clone2 = expr_clone.clone();
+            let env_clone2 = env_clone.clone();
+            let cont_clone2 = cont_clone.clone();
+            Ok(Bounce::Continue(Box::new(move || {
+                eval_sequence(expr_clone2, idx + 1, len, &env_clone2, cont_clone2)
+            })))
+        });
+        eval(expr_i, env, seq_cont)
+    }
+}
+
+fn eval_if(expr: ValRef, env: &ValRef, cont: Cont) -> Result<Bounce, ValRef> {
+    let len = expr.as_ref().list_len();
+    if len != 4 {
+        return Err(ValRef::symbol(String::from("if requires 3 arguments")));
+    }
+
+    let cond_expr = expr
+        .as_ref()
+        .list_nth(1)
+        .ok_or(ValRef::symbol(String::from("if missing condition")))?;
+
+    let then_branch = expr
+        .as_ref()
+        .list_nth(2)
+        .ok_or(ValRef::symbol(String::from("if missing then branch")))?;
+    let else_branch = expr
+        .as_ref()
+        .list_nth(3)
+        .ok_or(ValRef::symbol(String::from("if missing else branch")))?;
+
+    let env_clone = env.clone();
+    let cont_clone = cont.clone();
+    let if_cont = Rc::new(move |cond: ValRef| {
+        let is_true = match cond.as_ref() {
+            Value::Bool(b) => *b,
+            Value::Nil => false,
+            _ => true,
+        };
+        let branch = if is_true {
+            then_branch.clone()
+        } else {
+            else_branch.clone()
+        };
+        let env_clone2 = env_clone.clone();
+        let cont_clone2 = cont_clone.clone();
+        Ok(Bounce::Continue(Box::new(move || {
+            eval(branch, &env_clone2, cont_clone2)
+        })))
+    });
+
+    eval(cond_expr, env, if_cont)
+}
+
+fn eval_quote(expr: ValRef, cont: Cont) -> Result<Bounce, ValRef> {
+    let len = expr.as_ref().list_len();
+    if len != 2 {
+        return Err(ValRef::symbol(String::from("quote requires 1 argument")));
+    }
+    let quoted = expr
+        .as_ref()
+        .list_nth(1)
+        .ok_or(ValRef::symbol(String::from("quote missing argument")))?;
+    cont(quoted)
+}
+
+fn eval_call_cc(expr: ValRef, env: &ValRef, cont: Cont) -> Result<Bounce, ValRef> {
+    let len = expr.as_ref().list_len();
+    if len != 2 {
+        return Err(ValRef::symbol(String::from("call/cc requires 1 argument")));
+    }
+
+    let func_expr = expr
+        .as_ref()
+        .list_nth(1)
+        .ok_or(ValRef::symbol(String::from("call/cc missing argument")))?;
+
+    // Capture the current continuation as a first-class value
+    let captured_cont = cont.clone();
+    let continuation_value = ValRef::continuation(captured_cont);
+
+    // Create argument list containing the continuation
+    let args = ValRef::cons(continuation_value, ValRef::nil());
+
+    // Evaluate the function and apply it to the continuation
+    let env_clone = env.clone();
+    let cont_clone = cont.clone();
+    let callcc_cont = Rc::new(move |func: ValRef| {
+        let func_clone = func.clone();
+        let args_clone = args.clone();
+        let cont_clone2 = cont_clone.clone();
+        Ok(Bounce::Continue(Box::new(move || {
+            apply(func_clone, args_clone, cont_clone2)
+        })))
+    });
+
+    eval(func_expr, env, callcc_cont)
+}
+
+fn eval_application(expr: ValRef, env: &ValRef, cont: Cont) -> Result<Bounce, ValRef> {
+    let cell = expr
+        .as_cons()
+        .ok_or(ValRef::symbol(String::from("Not a list")))?;
+    let (car, cdr) = cell.borrow().clone();
+
+    let env_clone = env.clone();
+    let cdr_clone = cdr.clone();
+    let cont_clone = cont.clone();
+    let func_cont = Rc::new(move |func: ValRef| {
+        let func_clone = func.clone();
+        let cdr_clone2 = cdr_clone.clone();
+        let env_clone2 = env_clone.clone();
+        let cont_clone2 = cont_clone.clone();
+        Ok(Bounce::Continue(Box::new(move || {
+            let func_clone2 = func_clone.clone();
+            let cont_clone3 = cont_clone2.clone();
+            eval_args(
+                cdr_clone2,
+                ValRef::nil(),
+                &env_clone2,
+                Rc::new(move |args: ValRef| {
+                    let func_clone3 = func_clone2.clone();
+                    let args_clone = args.clone();
+                    let cont_clone4 = cont_clone3.clone();
+                    Ok(Bounce::Continue(Box::new(move || {
+                        apply(func_clone3, args_clone, cont_clone4)
+                    })))
+                }),
+            )
+        })))
+    });
+
+    eval(car, env, func_cont)
+}
+
+fn eval_args(exprs: ValRef, acc: ValRef, env: &ValRef, cont: Cont) -> Result<Bounce, ValRef> {
+    match exprs.as_ref() {
+        Value::Nil => {
+            // Reverse accumulated args and continue
+            cont(reverse_list(acc))
+        }
+        Value::Cons(cell) => {
+            let (car, cdr) = cell.borrow().clone();
+            let acc_clone = acc.clone();
+            let cdr_clone = cdr.clone();
+            let env_clone = env.clone();
+            let cont_clone = cont.clone();
+            let args_cont = Rc::new(move |val: ValRef| {
+                let new_acc = ValRef::cons(val, acc_clone.clone());
+                let cdr_clone2 = cdr_clone.clone();
+                let env_clone2 = env_clone.clone();
+                let cont_clone2 = cont_clone.clone();
+                Ok(Bounce::Continue(Box::new(move || {
+                    eval_args(cdr_clone2, new_acc, &env_clone2, cont_clone2)
+                })))
+            });
+            eval(car, env, args_cont)
+        }
+        _ => Err(ValRef::symbol(String::from("Malformed argument list"))),
+    }
+}
+
+fn apply(func: ValRef, args: ValRef, cont: Cont) -> Result<Bounce, ValRef> {
+    match func.as_ref() {
+        Value::Builtin(f) => f(&args, cont),
+        Value::Lambda {
+            params,
+            body,
+            env: lambda_env,
+        } => {
+            let param_count = params.as_ref().list_len();
+            let arg_count = args.as_ref().list_len();
+
+            if arg_count != param_count {
+                return Err(ValRef::symbol(String::from(
+                    "Lambda argument count mismatch",
+                )));
+            }
+
+            let call_env = env_with_parent(lambda_env.clone());
+
+            let mut param_cur = params.clone();
+            let mut arg_cur = args.clone();
+
+            loop {
+                match (param_cur.as_ref(), arg_cur.as_ref()) {
+                    (Value::Cons(p_cell), Value::Cons(a_cell)) => {
+                        let (p_car, p_cdr) = p_cell.borrow().clone();
+                        let (a_car, a_cdr) = a_cell.borrow().clone();
+                        if let Value::Symbol(param_name) = p_car.as_ref() {
+                            env_set(&call_env, param_name.clone(), a_car);
+                        }
+                        param_cur = p_cdr;
+                        arg_cur = a_cdr;
+                    }
+                    (Value::Nil, Value::Nil) => break,
+                    _ => {
+                        return Err(ValRef::symbol(String::from("Parameter/argument mismatch")));
+                    }
+                }
+            }
+
+            eval(body.clone(), &call_env, cont)
+        }
+        Value::Continuation(captured_cont) => {
+            // When invoking a continuation, we ignore the current continuation
+            // and jump directly to the captured one
+            let arg_count = args.as_ref().list_len();
+            if arg_count != 1 {
+                return Err(ValRef::symbol(String::from(
+                    "Continuation requires exactly 1 argument",
+                )));
+            }
+            let arg = args
+                .as_ref()
+                .list_nth(0)
+                .ok_or(ValRef::symbol(String::from(
+                    "Continuation missing argument",
+                )))?;
+
+            // Jump to the captured continuation with the argument
+            captured_cont.clone()(arg)
+        }
+        _ => Err(ValRef::symbol(String::from("Cannot call non-function"))),
     }
 }
 
 // ============================================================================
-// Built-in Functions
+// Built-in Functions (CPS versions with Trampoline)
 // ============================================================================
 
-fn builtin_add(args: &ValRef) -> Result<ValRef, ValRef> {
+fn builtin_add(args: &ValRef, cont: Cont) -> Result<Bounce, ValRef> {
     let mut result: i64 = 0;
     let mut current = args.clone();
 
@@ -935,10 +1140,10 @@ fn builtin_add(args: &ValRef) -> Result<ValRef, ValRef> {
         }
     }
 
-    Ok(ValRef::number(result))
+    cont(ValRef::number(result))
 }
 
-fn builtin_sub(args: &ValRef) -> Result<ValRef, ValRef> {
+fn builtin_sub(args: &ValRef, cont: Cont) -> Result<Bounce, ValRef> {
     let len = args.as_ref().list_len();
     if len == 0 {
         return Err(ValRef::symbol(String::from(
@@ -955,7 +1160,7 @@ fn builtin_sub(args: &ValRef) -> Result<ValRef, ValRef> {
         .ok_or(ValRef::symbol(String::from("- requires numbers")))?;
 
     if len == 1 {
-        return Ok(ValRef::number(
+        return cont(ValRef::number(
             first_num
                 .checked_neg()
                 .ok_or(ValRef::symbol(String::from("Integer overflow")))?,
@@ -986,10 +1191,10 @@ fn builtin_sub(args: &ValRef) -> Result<ValRef, ValRef> {
         }
     }
 
-    Ok(ValRef::number(result))
+    cont(ValRef::number(result))
 }
 
-fn builtin_mul(args: &ValRef) -> Result<ValRef, ValRef> {
+fn builtin_mul(args: &ValRef, cont: Cont) -> Result<Bounce, ValRef> {
     let mut result: i64 = 1;
     let mut current = args.clone();
 
@@ -1010,10 +1215,10 @@ fn builtin_mul(args: &ValRef) -> Result<ValRef, ValRef> {
         }
     }
 
-    Ok(ValRef::number(result))
+    cont(ValRef::number(result))
 }
 
-fn builtin_div(args: &ValRef) -> Result<ValRef, ValRef> {
+fn builtin_div(args: &ValRef, cont: Cont) -> Result<Bounce, ValRef> {
     let len = args.as_ref().list_len();
     if len < 2 {
         return Err(ValRef::symbol(String::from(
@@ -1055,10 +1260,10 @@ fn builtin_div(args: &ValRef) -> Result<ValRef, ValRef> {
         }
     }
 
-    Ok(ValRef::number(result))
+    cont(ValRef::number(result))
 }
 
-fn builtin_eq(args: &ValRef) -> Result<ValRef, ValRef> {
+fn builtin_eq(args: &ValRef, cont: Cont) -> Result<Bounce, ValRef> {
     if args.as_ref().list_len() != 2 {
         return Err(ValRef::symbol(String::from("= requires 2 arguments")));
     }
@@ -1076,10 +1281,10 @@ fn builtin_eq(args: &ValRef) -> Result<ValRef, ValRef> {
     let b_num = b
         .as_number()
         .ok_or(ValRef::symbol(String::from("= requires numbers")))?;
-    Ok(ValRef::bool_val(a_num == b_num))
+    cont(ValRef::bool_val(a_num == b_num))
 }
 
-fn builtin_lt(args: &ValRef) -> Result<ValRef, ValRef> {
+fn builtin_lt(args: &ValRef, cont: Cont) -> Result<Bounce, ValRef> {
     if args.as_ref().list_len() != 2 {
         return Err(ValRef::symbol(String::from("< requires 2 arguments")));
     }
@@ -1097,10 +1302,10 @@ fn builtin_lt(args: &ValRef) -> Result<ValRef, ValRef> {
     let b_num = b
         .as_number()
         .ok_or(ValRef::symbol(String::from("< requires numbers")))?;
-    Ok(ValRef::bool_val(a_num < b_num))
+    cont(ValRef::bool_val(a_num < b_num))
 }
 
-fn builtin_gt(args: &ValRef) -> Result<ValRef, ValRef> {
+fn builtin_gt(args: &ValRef, cont: Cont) -> Result<Bounce, ValRef> {
     if args.as_ref().list_len() != 2 {
         return Err(ValRef::symbol(String::from("> requires 2 arguments")));
     }
@@ -1118,14 +1323,14 @@ fn builtin_gt(args: &ValRef) -> Result<ValRef, ValRef> {
     let b_num = b
         .as_number()
         .ok_or(ValRef::symbol(String::from("> requires numbers")))?;
-    Ok(ValRef::bool_val(a_num > b_num))
+    cont(ValRef::bool_val(a_num > b_num))
 }
 
-fn builtin_list(args: &ValRef) -> Result<ValRef, ValRef> {
-    Ok(args.clone())
+fn builtin_list(args: &ValRef, cont: Cont) -> Result<Bounce, ValRef> {
+    cont(args.clone())
 }
 
-fn builtin_car(args: &ValRef) -> Result<ValRef, ValRef> {
+fn builtin_car(args: &ValRef, cont: Cont) -> Result<Bounce, ValRef> {
     if args.as_ref().list_len() != 1 {
         return Err(ValRef::symbol(String::from("car requires 1 argument")));
     }
@@ -1137,10 +1342,10 @@ fn builtin_car(args: &ValRef) -> Result<ValRef, ValRef> {
         .as_cons()
         .ok_or(ValRef::symbol(String::from("car requires a cons/list")))?;
     let (car, _) = cell.borrow().clone();
-    Ok(car)
+    cont(car)
 }
 
-fn builtin_cdr(args: &ValRef) -> Result<ValRef, ValRef> {
+fn builtin_cdr(args: &ValRef, cont: Cont) -> Result<Bounce, ValRef> {
     if args.as_ref().list_len() != 1 {
         return Err(ValRef::symbol(String::from("cdr requires 1 argument")));
     }
@@ -1152,10 +1357,10 @@ fn builtin_cdr(args: &ValRef) -> Result<ValRef, ValRef> {
         .as_cons()
         .ok_or(ValRef::symbol(String::from("cdr requires a cons/list")))?;
     let (_, cdr) = cell.borrow().clone();
-    Ok(cdr)
+    cont(cdr)
 }
 
-fn builtin_cons_fn(args: &ValRef) -> Result<ValRef, ValRef> {
+fn builtin_cons_fn(args: &ValRef, cont: Cont) -> Result<Bounce, ValRef> {
     if args.as_ref().list_len() != 2 {
         return Err(ValRef::symbol(String::from("cons requires 2 arguments")));
     }
@@ -1167,10 +1372,10 @@ fn builtin_cons_fn(args: &ValRef) -> Result<ValRef, ValRef> {
         .as_ref()
         .list_nth(1)
         .ok_or(ValRef::symbol(String::from("cons missing arg 2")))?;
-    Ok(ValRef::cons(car, cdr))
+    cont(ValRef::cons(car, cdr))
 }
 
-fn builtin_null(args: &ValRef) -> Result<ValRef, ValRef> {
+fn builtin_null(args: &ValRef, cont: Cont) -> Result<Bounce, ValRef> {
     if args.as_ref().list_len() != 1 {
         return Err(ValRef::symbol(String::from("null? requires 1 argument")));
     }
@@ -1178,10 +1383,10 @@ fn builtin_null(args: &ValRef) -> Result<ValRef, ValRef> {
         .as_ref()
         .list_nth(0)
         .ok_or(ValRef::symbol(String::from("null? missing argument")))?;
-    Ok(ValRef::bool_val(val.is_nil()))
+    cont(ValRef::bool_val(val.is_nil()))
 }
 
-fn builtin_cons_p(args: &ValRef) -> Result<ValRef, ValRef> {
+fn builtin_cons_p(args: &ValRef, cont: Cont) -> Result<Bounce, ValRef> {
     if args.as_ref().list_len() != 1 {
         return Err(ValRef::symbol(String::from("cons? requires 1 argument")));
     }
@@ -1189,10 +1394,10 @@ fn builtin_cons_p(args: &ValRef) -> Result<ValRef, ValRef> {
         .as_ref()
         .list_nth(0)
         .ok_or(ValRef::symbol(String::from("cons? missing argument")))?;
-    Ok(ValRef::bool_val(val.as_cons().is_some()))
+    cont(ValRef::bool_val(val.as_cons().is_some()))
 }
 
-fn builtin_length(args: &ValRef) -> Result<ValRef, ValRef> {
+fn builtin_length(args: &ValRef, cont: Cont) -> Result<Bounce, ValRef> {
     if args.as_ref().list_len() != 1 {
         return Err(ValRef::symbol(String::from("length requires 1 argument")));
     }
@@ -1201,10 +1406,10 @@ fn builtin_length(args: &ValRef) -> Result<ValRef, ValRef> {
         .list_nth(0)
         .ok_or(ValRef::symbol(String::from("length missing argument")))?;
     let len = list.as_ref().list_len();
-    Ok(ValRef::number(len as i64))
+    cont(ValRef::number(len as i64))
 }
 
-fn builtin_append(args: &ValRef) -> Result<ValRef, ValRef> {
+fn builtin_append(args: &ValRef, cont: Cont) -> Result<Bounce, ValRef> {
     let mut result = ValRef::nil();
     let mut current = args.clone();
 
@@ -1231,10 +1436,10 @@ fn builtin_append(args: &ValRef) -> Result<ValRef, ValRef> {
         }
     }
 
-    Ok(reverse_list(result))
+    cont(reverse_list(result))
 }
 
-fn builtin_reverse(args: &ValRef) -> Result<ValRef, ValRef> {
+fn builtin_reverse(args: &ValRef, cont: Cont) -> Result<Bounce, ValRef> {
     if args.as_ref().list_len() != 1 {
         return Err(ValRef::symbol(String::from("reverse requires 1 argument")));
     }
@@ -1242,7 +1447,30 @@ fn builtin_reverse(args: &ValRef) -> Result<ValRef, ValRef> {
         .as_ref()
         .list_nth(0)
         .ok_or(ValRef::symbol(String::from("reverse missing argument")))?;
-    Ok(reverse_list(list))
+    cont(reverse_list(list))
+}
+
+fn builtin_call_cc(args: &ValRef, cont: Cont) -> Result<Bounce, ValRef> {
+    // This should never be called directly - call/cc is handled as a special form
+    // But we provide it for consistency
+    if args.as_ref().list_len() != 1 {
+        return Err(ValRef::symbol(String::from("call/cc requires 1 argument")));
+    }
+
+    let func = args
+        .as_ref()
+        .list_nth(0)
+        .ok_or(ValRef::symbol(String::from("call/cc missing argument")))?;
+
+    // Wrap the current continuation as a value
+    let continuation_value = ValRef::continuation(cont.clone());
+    let cc_args = ValRef::cons(continuation_value, ValRef::nil());
+    let func_clone = func.clone();
+    let cont_clone = cont.clone();
+
+    Ok(Bounce::Continue(Box::new(move || {
+        apply(func_clone, cc_args, cont_clone)
+    })))
 }
 
 // ============================================================================
@@ -1251,8 +1479,16 @@ fn builtin_reverse(args: &ValRef) -> Result<ValRef, ValRef> {
 
 pub fn eval_str(input: &str, env: &ValRef) -> Result<ValRef, ValRef> {
     let expr = parse(input)?;
-    let result = eval(expr, env)?;
-    Ok(result)
+    let result_cell = Rc::new(RefCell::new(None));
+    let cont = halt_cont(&result_cell);
+
+    let bounce = eval(expr, env, cont)?;
+    trampoline(bounce)?;
+
+    result_cell
+        .borrow_mut()
+        .take()
+        .ok_or_else(|| ValRef::symbol(String::from("Evaluation did not produce a result")))?
 }
 
 pub fn eval_str_multiple(input: &str, env: &ValRef) -> Result<ValRef, ValRef> {
@@ -1261,22 +1497,47 @@ pub fn eval_str_multiple(input: &str, env: &ValRef) -> Result<ValRef, ValRef> {
         return Err(ValRef::symbol(String::from("No expressions to evaluate")));
     }
 
-    let mut last_result = ValRef::nil();
-    let mut current = expressions;
+    let result_cell = Rc::new(RefCell::new(None));
+    let cont = halt_cont(&result_cell);
 
-    loop {
-        match current.as_ref() {
-            Value::Cons(cell) => {
-                let (expr, rest) = cell.borrow().clone();
-                last_result = eval(expr, env)?;
-                current = rest;
+    let bounce = eval_multiple_helper(expressions, env, cont)?;
+    trampoline(bounce)?;
+
+    result_cell
+        .borrow_mut()
+        .take()
+        .ok_or_else(|| ValRef::symbol(String::from("Evaluation did not produce a result")))?
+}
+
+fn eval_multiple_helper(exprs: ValRef, env: &ValRef, cont: Cont) -> Result<Bounce, ValRef> {
+    match exprs.as_ref() {
+        Value::Nil => cont(ValRef::nil()),
+        Value::Cons(cell) => {
+            let (expr, rest) = cell.borrow().clone();
+
+            if rest.is_nil() {
+                // Last expression
+                eval(expr, env, cont)
+            } else {
+                // Not last - evaluate and continue
+                let rest_clone = rest.clone();
+                let env_clone = env.clone();
+                let cont_clone = cont.clone();
+
+                let multi_cont = Rc::new(move |_: ValRef| {
+                    let rest_clone2 = rest_clone.clone();
+                    let env_clone2 = env_clone.clone();
+                    let cont_clone2 = cont_clone.clone();
+                    Ok(Bounce::Continue(Box::new(move || {
+                        eval_multiple_helper(rest_clone2, &env_clone2, cont_clone2)
+                    })))
+                });
+
+                eval(expr, env, multi_cont)
             }
-            Value::Nil => break,
-            _ => return Err(ValRef::symbol(String::from("Invalid expression list"))),
         }
+        _ => Err(ValRef::symbol(String::from("Invalid expression list"))),
     }
-
-    Ok(last_result)
 }
 
 impl PartialEq for ValRef {
@@ -1305,6 +1566,7 @@ impl PartialEq for ValRef {
                     env: _,
                 },
             ) => p1 == p2 && b1 == b2,
+            (Value::Continuation(a), Value::Continuation(b)) => Rc::ptr_eq(a, b),
             _ => false,
         }
     }

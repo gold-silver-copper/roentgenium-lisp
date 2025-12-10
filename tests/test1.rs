@@ -7,6 +7,8 @@
 //! - Environment operations
 //! - Integration with the evaluator
 //! - Complex nested structures
+//! - Recursion and tail call optimization
+//! - Higher-order functions
 //! - Edge cases and error handling
 
 use rlisp::*;
@@ -38,6 +40,14 @@ fn assert_bool(val: &ValRef, expected: bool) {
         Value::Bool(b) => assert_eq!(*b, expected, "Expected {}, got {}", expected, b),
         other => panic!("Expected Bool({}), got {:?}", expected, other),
     }
+}
+
+fn list_len(val: &ValRef) -> usize {
+    val.as_ref().list_len()
+}
+
+fn list_nth(val: &ValRef, n: usize) -> Option<ValRef> {
+    val.as_ref().list_nth(n)
 }
 
 // ============================================================================
@@ -445,12 +455,24 @@ fn test_basic_arithmetic() {
 
     let result = eval_code("(/ 20 4)").unwrap();
     assert_number(&result, 5);
+
+    let result = eval_code("(* 2 3 4)").unwrap();
+    assert_number(&result, 24);
+
+    let result = eval_code("(- 10 3 2)").unwrap();
+    assert_number(&result, 5);
+
+    let result = eval_code("(/ 100 5 2)").unwrap();
+    assert_number(&result, 10);
 }
 
 #[test]
 fn test_nested_arithmetic() {
     let result = eval_code("(+ (* 2 3) (- 10 5))").unwrap();
     assert_number(&result, 11);
+
+    let result = eval_code("(+ (* 2 3) (- 10 5) (/ 20 4))").unwrap();
+    assert_number(&result, 16); // 6 + 5 + 5
 }
 
 #[test]
@@ -465,6 +487,9 @@ fn test_comparison_operators() {
     assert_bool(&result, true);
 
     let result = eval_code("(> 5 3)").unwrap();
+    assert_bool(&result, true);
+
+    let result = eval_code("(> 10 5)").unwrap();
     assert_bool(&result, true);
 }
 
@@ -501,6 +526,10 @@ fn test_define_and_lookup() {
     eval_with_env("(define x 42)", &env).unwrap();
     let result = eval_with_env("x", &env).unwrap();
     assert_number(&result, 42);
+
+    eval_with_env("(define y (* x 2))", &env).unwrap();
+    let result = eval_with_env("y", &env).unwrap();
+    assert_number(&result, 84);
 }
 
 #[test]
@@ -510,6 +539,9 @@ fn test_lambda_application() {
 
     let result = eval_code("((lambda (x y) (+ x y)) 3 4)").unwrap();
     assert_number(&result, 7);
+
+    let result = eval_code("((lambda (x) (* x x)) 5)").unwrap();
+    assert_number(&result, 25);
 }
 
 #[test]
@@ -523,6 +555,10 @@ fn test_lambda_closure() {
     eval_with_env("(define add5 (make-adder 5))", &env).unwrap();
 
     let result = eval_with_env("(add5 10)", &env).unwrap();
+    assert_number(&result, 15);
+
+    eval_with_env("(define add10 (make-adder 10))", &env).unwrap();
+    let result = eval_with_env("(add10 5)", &env).unwrap();
     assert_number(&result, 15);
 }
 
@@ -540,6 +576,18 @@ fn test_list_operations() {
 
     let result = eval_with_env("(length mylist)", &env).unwrap();
     assert_number(&result, 4);
+
+    let result = eval_with_env("(car '(1 2 3))", &env).unwrap();
+    assert_number(&result, 1);
+
+    let result = eval_with_env("(length '(1 2 3 4 5))", &env).unwrap();
+    assert_number(&result, 5);
+
+    let result = eval_with_env("(null? ())", &env).unwrap();
+    assert_bool(&result, true);
+
+    let result = eval_with_env("(null? '(1))", &env).unwrap();
+    assert_bool(&result, false);
 }
 
 #[test]
@@ -555,6 +603,12 @@ fn test_cons_operations() {
     assert_bool(&result, true);
 
     let result = eval_with_env("(null? (cons 1 ()))", &env).unwrap();
+    assert_bool(&result, false);
+
+    let result = eval_with_env("(cons? (cons 1 2))", &env).unwrap();
+    assert_bool(&result, true);
+
+    let result = eval_with_env("(cons? 42)", &env).unwrap();
     assert_bool(&result, false);
 }
 
@@ -666,6 +720,91 @@ fn test_type_error_in_arithmetic() {
 }
 
 // ============================================================================
+// Tail Call Optimization Tests
+// ============================================================================
+
+#[test]
+fn test_simple_tail_recursion() {
+    let env = env_new();
+
+    eval_with_env(
+        r#"
+        (define countdown
+          (lambda (n acc)
+            (if (= n 0)
+                acc
+                (countdown (- n 1) (+ acc 1)))))
+        "#,
+        &env,
+    )
+    .unwrap();
+
+    let result = eval_with_env("(countdown 100 0)", &env).unwrap();
+    assert_number(&result, 100);
+}
+
+#[test]
+fn test_deep_tail_recursion() {
+    let env = env_new();
+
+    eval_with_env(
+        r#"
+        (define sum-tail
+          (lambda (n acc)
+            (if (= n 0)
+                acc
+                (sum-tail (- n 1) (+ acc n)))))
+        "#,
+        &env,
+    )
+    .unwrap();
+
+    let result = eval_with_env("(sum-tail 1000 0)", &env).unwrap();
+    assert_number(&result, 500500);
+}
+
+#[test]
+fn test_factorial_tail_recursive() {
+    let env = env_new();
+
+    eval_with_env(
+        r#"
+        (define factorial
+          (lambda (n acc)
+            (if (= n 0)
+                acc
+                (factorial (- n 1) (* n acc)))))
+        "#,
+        &env,
+    )
+    .unwrap();
+
+    let result = eval_with_env("(factorial 10 1)", &env).unwrap();
+    assert_number(&result, 3628800);
+}
+
+#[test]
+fn test_very_deep_recursion() {
+    let env = env_new();
+
+    eval_with_env(
+        r#"
+        (define deep-sum
+          (lambda (n acc)
+            (if (= n 0)
+                acc
+                (deep-sum (- n 1) (+ acc 1)))))
+        "#,
+        &env,
+    )
+    .unwrap();
+
+    // Should work with proper TCO
+    let result = eval_with_env("(deep-sum 10000 0)", &env).unwrap();
+    assert_number(&result, 10000);
+}
+
+// ============================================================================
 // Complex Integration Tests
 // ============================================================================
 
@@ -686,6 +825,20 @@ fn test_higher_order_functions() {
 
     let result = eval_with_env("(car (map double (list 1 2 3)))", &env).unwrap();
     assert_number(&result, 2);
+
+    let result = eval_with_env("(map (lambda (x) (* x x)) '(1 2 3 4))", &env).unwrap();
+
+    let first = list_nth(&result, 0).unwrap();
+    assert_number(&first, 1);
+
+    let second = list_nth(&result, 1).unwrap();
+    assert_number(&second, 4);
+
+    let third = list_nth(&result, 2).unwrap();
+    assert_number(&third, 9);
+
+    let fourth = list_nth(&result, 3).unwrap();
+    assert_number(&fourth, 16);
 }
 
 #[test]
@@ -762,4 +915,399 @@ fn test_parse_multiple_expressions() {
     }
 
     assert_number(&result, 3);
+}
+
+#[test]
+fn test_fibonacci_tree_recursion() {
+    let env = env_new();
+
+    eval_with_env(
+        r#"
+        (define fib
+          (lambda (n)
+            (if (< n 2)
+                n
+                (+ (fib (- n 1)) (fib (- n 2))))))
+        "#,
+        &env,
+    )
+    .unwrap();
+
+    let result = eval_with_env("(fib 10)", &env).unwrap();
+    assert_number(&result, 55);
+
+    let result = eval_with_env("(fib 15)", &env).unwrap();
+    assert_number(&result, 610);
+}
+
+#[test]
+fn test_mutual_recursion() {
+    let env = env_new();
+
+    eval_with_env(
+        r#"
+        (define is-even
+          (lambda (n)
+            (if (= n 0)
+                #t
+                (is-odd (- n 1)))))
+        "#,
+        &env,
+    )
+    .unwrap();
+
+    eval_with_env(
+        r#"
+        (define is-odd
+          (lambda (n)
+            (if (= n 0)
+                #f
+                (is-even (- n 1)))))
+        "#,
+        &env,
+    )
+    .unwrap();
+
+    let result = eval_with_env("(is-even 100)", &env).unwrap();
+    assert_bool(&result, true);
+
+    let result = eval_with_env("(is-odd 99)", &env).unwrap();
+    assert_bool(&result, true);
+
+    let result = eval_with_env("(is-even 1000)", &env).unwrap();
+    assert_bool(&result, true);
+}
+
+#[test]
+fn test_ackermann_function() {
+    let env = env_new();
+
+    eval_with_env(
+        r#"
+        (define ackermann
+          (lambda (m n)
+            (if (= m 0)
+                (+ n 1)
+                (if (= n 0)
+                    (ackermann (- m 1) 1)
+                    (ackermann (- m 1) (ackermann m (- n 1)))))))
+        "#,
+        &env,
+    )
+    .unwrap();
+
+    let result = eval_with_env("(ackermann 2 2)", &env).unwrap();
+    assert_number(&result, 7);
+
+    let result = eval_with_env("(ackermann 3 2)", &env).unwrap();
+    assert_number(&result, 29);
+}
+
+#[test]
+fn test_filter_function() {
+    let env = env_new();
+
+    eval_with_env(
+        r#"
+        (define filter
+          (lambda (pred lst)
+            (if (null? lst)
+                ()
+                (if (pred (car lst))
+                    (cons (car lst) (filter pred (cdr lst)))
+                    (filter pred (cdr lst))))))
+        "#,
+        &env,
+    )
+    .unwrap();
+
+    let result = eval_with_env("(filter (lambda (x) (> x 0)) '(-2 -1 0 1 2 3))", &env).unwrap();
+
+    assert_eq!(list_len(&result), 3);
+
+    let first = list_nth(&result, 0).unwrap();
+    assert_number(&first, 1);
+
+    let second = list_nth(&result, 1).unwrap();
+    assert_number(&second, 2);
+
+    let third = list_nth(&result, 2).unwrap();
+    assert_number(&third, 3);
+}
+
+#[test]
+fn test_compose_function() {
+    let env = env_new();
+
+    eval_with_env(
+        r#"
+        (define compose
+          (lambda (f g)
+            (lambda (x) (f (g x)))))
+        "#,
+        &env,
+    )
+    .unwrap();
+
+    eval_with_env("(define add1 (lambda (x) (+ x 1)))", &env).unwrap();
+    eval_with_env("(define square (lambda (x) (* x x)))", &env).unwrap();
+    eval_with_env("(define composed (compose add1 square))", &env).unwrap();
+
+    let result = eval_with_env("(composed 5)", &env).unwrap();
+    assert_number(&result, 26); // square(5) + 1 = 25 + 1 = 26
+}
+
+#[test]
+fn test_list_building() {
+    let env = env_new();
+
+    eval_with_env(
+        r#"
+        (define build-list
+          (lambda (n acc)
+            (if (= n 0)
+                acc
+                (build-list (- n 1) (cons n acc)))))
+        "#,
+        &env,
+    )
+    .unwrap();
+
+    let result = eval_with_env("(build-list 100 ())", &env).unwrap();
+    assert_eq!(list_len(&result), 100);
+
+    let first = list_nth(&result, 0).unwrap();
+    assert_number(&first, 1);
+}
+
+#[test]
+fn test_nested_lambdas() {
+    let env = env_new();
+
+    let result = eval_with_env("((lambda (x) ((lambda (y) (+ x y)) 10)) 5)", &env).unwrap();
+    assert_number(&result, 15);
+}
+
+#[test]
+fn test_fold_operations() {
+    let env = env_new();
+
+    eval_with_env(
+        r#"
+        (define fold
+          (lambda (f acc lst)
+            (if (null? lst)
+                acc
+                (fold f (f acc (car lst)) (cdr lst)))))
+        "#,
+        &env,
+    )
+    .unwrap();
+
+    // Sum using fold
+    let result = eval_with_env(
+        "(fold (lambda (a b) (+ a b)) 0 '(1 2 3 4 5 6 7 8 9 10))",
+        &env,
+    )
+    .unwrap();
+    assert_number(&result, 55);
+
+    // Product using fold
+    let result = eval_with_env("(fold (lambda (a b) (* a b)) 1 '(1 2 3 4 5))", &env).unwrap();
+    assert_number(&result, 120);
+}
+
+#[test]
+fn test_deeply_nested_data_structures() {
+    let env = env_new();
+
+    eval_with_env(
+        r#"
+        (define make-nested
+          (lambda (depth val)
+            (if (= depth 0)
+                val
+                (cons (make-nested (- depth 1) val) ()))))
+        "#,
+        &env,
+    )
+    .unwrap();
+
+    eval_with_env(
+        r#"
+        (define extract-nested
+          (lambda (depth lst)
+            (if (= depth 0)
+                lst
+                (extract-nested (- depth 1) (car lst)))))
+        "#,
+        &env,
+    )
+    .unwrap();
+
+    // Create deeply nested structure (100 levels)
+    eval_with_env("(define nested (make-nested 100 42))", &env).unwrap();
+
+    // Extract the value
+    let result = eval_with_env("(extract-nested 100 nested)", &env).unwrap();
+    assert_number(&result, 42);
+}
+
+#[test]
+fn test_alternating_recursion_patterns() {
+    let env = env_new();
+
+    eval_with_env(
+        r#"
+        (define bounce
+          (lambda (n mode)
+            (if (= n 0)
+                mode
+                (if (= mode 0)
+                    (bounce (- n 1) 1)
+                    (bounce (- n 1) 0)))))
+        "#,
+        &env,
+    )
+    .unwrap();
+
+    let result = eval_with_env("(bounce 1000 0)", &env).unwrap();
+    assert_number(&result, 0); // Even number of bounces
+
+    let result = eval_with_env("(bounce 999 0)", &env).unwrap();
+    assert_number(&result, 1); // Odd number of bounces
+}
+
+#[test]
+fn test_complex_computation() {
+    let env = env_new();
+
+    eval_with_env(
+        r#"
+        (define compute-sum
+          (lambda (n)
+            (if (= n 0)
+                0
+                (+ n (compute-sum (- n 1))))))
+        "#,
+        &env,
+    )
+    .unwrap();
+
+    let result = eval_with_env("(compute-sum 100)", &env).unwrap();
+    assert_number(&result, 5050);
+}
+
+#[test]
+fn test_nested_closure_chains() {
+    let env = env_new();
+
+    eval_with_env(
+        r#"
+        (define make-chain
+          (lambda (n)
+            (if (= n 0)
+                (lambda (x) x)
+                (lambda (x) ((make-chain (- n 1)) (+ x 1))))))
+        "#,
+        &env,
+    )
+    .unwrap();
+
+    // Create chain of 50 closures
+    eval_with_env("(define chain50 (make-chain 50))", &env).unwrap();
+    let result = eval_with_env("(chain50 0)", &env).unwrap();
+    assert_number(&result, 50);
+}
+
+#[test]
+fn test_repeated_environment_modifications() {
+    let env = env_new();
+
+    // Define many variables
+    for i in 0..50 {
+        let def_expr = format!("(define var{} {})", i, i * 2);
+        eval_with_env(&def_expr, &env).unwrap();
+    }
+
+    // Verify a few
+    let result = eval_with_env("var0", &env).unwrap();
+    assert_number(&result, 0);
+
+    let result = eval_with_env("var25", &env).unwrap();
+    assert_number(&result, 50);
+
+    let result = eval_with_env("var49", &env).unwrap();
+    assert_number(&result, 98);
+}
+
+#[test]
+fn test_begin_sequencing() {
+    let env = env_new();
+
+    eval_with_env("(define x 0)", &env).unwrap();
+
+    let result = eval_with_env("(begin (define x 10) (define y 20) (+ x y))", &env).unwrap();
+    assert_number(&result, 30);
+
+    let result = eval_with_env("x", &env).unwrap();
+    assert_number(&result, 10);
+}
+
+#[test]
+fn test_lambda_with_begin_body() {
+    let env = env_new();
+
+    let code = r#"
+        (define test
+          (lambda (n)
+            (define temp (* n 2))
+            (define temp2 (+ temp 5))
+            temp2))
+    "#;
+
+    eval_with_env(code, &env).unwrap();
+    let result = eval_with_env("(test 10)", &env).unwrap();
+    assert_number(&result, 25); // 10 * 2 + 5 = 25
+}
+
+#[test]
+fn test_massive_list_operations() {
+    let env = env_new();
+
+    eval_with_env(
+        r#"
+        (define range
+          (lambda (n acc)
+            (if (= n 0)
+                acc
+                (range (- n 1) (cons n acc)))))
+        "#,
+        &env,
+    )
+    .unwrap();
+
+    // Create a list of 500 elements
+    let result = eval_with_env("(length (range 500 ()))", &env).unwrap();
+    assert_number(&result, 500);
+}
+
+#[test]
+fn test_count_down_loop() {
+    let env = env_new();
+
+    eval_with_env(
+        r#"
+        (define count-down
+          (lambda (n)
+            (if (= n 0)
+                0
+                (count-down (- n 1)))))
+        "#,
+        &env,
+    )
+    .unwrap();
+
+    let result = eval_with_env("(count-down 1000)", &env).unwrap();
+    assert_number(&result, 0);
 }

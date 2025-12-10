@@ -71,7 +71,7 @@ fn benchmark_single(name: &str, expr: &str, env: &rlisp::ValRef) -> Result<u128,
 
 fn main() {
     println!("╔════════════════════════════════════════════════════════════╗");
-    println!("║     COMPREHENSIVE LISP INTERPRETER BENCHMARK SUITE        ║");
+    println!("║   CPS LISP INTERPRETER BENCHMARK SUITE (with call/cc)     ║");
     println!("╚════════════════════════════════════════════════════════════╝\n");
 
     let env = new_env();
@@ -219,10 +219,185 @@ fn main() {
     benchmark_expression("Nested closure call", "(mul2x3 4)", &env, 50000);
 
     // ========================================================================
-    // SECTION 6: Recursive Functions
+    // SECTION 6: call/cc - CONTINUATION OPERATIONS
     // ========================================================================
     println!("┌─────────────────────────────────────────────────────────────┐");
-    println!("│ 6. RECURSIVE FUNCTIONS                                      │");
+    println!("│ 6. call/cc - CONTINUATION OPERATIONS                        │");
+    println!("└─────────────────────────────────────────────────────────────┘\n");
+
+    // Simple continuation capture and use
+    benchmark_expression(
+        "Simple call/cc identity",
+        "(call/cc (lambda (k) (k 42)))",
+        &env,
+        10000,
+    );
+
+    benchmark_expression(
+        "call/cc with computation",
+        "(call/cc (lambda (k) (+ 10 (k 5))))",
+        &env,
+        10000,
+    );
+
+    // Early return pattern
+    benchmark_expression(
+        "Early return via call/cc",
+        "(+ 1 (call/cc (lambda (return) (return 99) 50)))",
+        &env,
+        10000,
+    );
+
+    // Nested call/cc
+    benchmark_expression(
+        "Nested call/cc",
+        "(call/cc (lambda (k1) (+ 10 (call/cc (lambda (k2) (k1 5))))))",
+        &env,
+        10000,
+    );
+
+    // call/cc in conditional
+    benchmark_expression(
+        "call/cc with if",
+        "(if (call/cc (lambda (k) (k #t))) 100 200)",
+        &env,
+        10000,
+    );
+
+    // Exception-like behavior
+    let _ = eval_str_multiple(
+        r#"
+        (define try-divide
+          (lambda (a b)
+            (call/cc (lambda (escape)
+              (if (= b 0)
+                  (escape -1)
+                  (/ a b))))))
+        "#,
+        &env,
+    );
+    benchmark_expression("Exception-like (success)", "(try-divide 10 2)", &env, 10000);
+    benchmark_expression("Exception-like (failure)", "(try-divide 10 0)", &env, 10000);
+
+    // Search with early exit
+    let _ = eval_str_multiple(
+        r#"
+        (define find-in-list
+          (lambda (pred lst)
+            (call/cc (lambda (return)
+              (define search
+                (lambda (l)
+                  (if (null? l)
+                      (return #f)
+                      (if (pred (car l))
+                          (return (car l))
+                          (search (cdr l))))))
+              (search lst)))))
+        "#,
+        &env,
+    );
+    benchmark_expression(
+        "Search with call/cc (found)",
+        "(find-in-list (lambda (x) (= x 5)) '(1 2 3 4 5 6 7))",
+        &env,
+        5000,
+    );
+    benchmark_expression(
+        "Search with call/cc (not found)",
+        "(find-in-list (lambda (x) (= x 99)) '(1 2 3 4 5 6 7))",
+        &env,
+        5000,
+    );
+
+    // Continuation as first-class value
+    let _ = eval_str_multiple(
+        r#"
+        (define saved-cont #f)
+        (define save-it
+          (lambda ()
+            (call/cc (lambda (k)
+              (begin
+                (set! saved-cont k)
+                0)))))
+        "#,
+        &env,
+    );
+    let _ = eval_str("(save-it)", &env);
+    benchmark_expression("Invoke saved continuation", "(saved-cont 42)", &env, 10000);
+
+    // Backtracking simulation
+    let _ = eval_str_multiple(
+        r#"
+        (define amb-fail #f)
+        (define amb
+          (lambda (choices)
+            (call/cc (lambda (return)
+              (define try-choice
+                (lambda (lst)
+                  (if (null? lst)
+                      (amb-fail)
+                      (call/cc (lambda (fail)
+                        (begin
+                          (set! amb-fail fail)
+                          (return (car lst))))))))
+              (try-choice choices)))))
+        "#,
+        &env,
+    );
+
+    println!("--- call/cc Performance Comparison ---");
+    println!("Comparing normal recursion vs call/cc-based early exit:\n");
+
+    // Normal recursive search
+    let _ = eval_str_multiple(
+        r#"
+        (define find-normal
+          (lambda (pred lst)
+            (if (null? lst)
+                #f
+                (if (pred (car lst))
+                    (car lst)
+                    (find-normal pred (cdr lst))))))
+        "#,
+        &env,
+    );
+
+    let normal_start = Instant::now();
+    for _ in 0..1000 {
+        let _ = eval_str(
+            "(find-normal (lambda (x) (= x 5)) '(1 2 3 4 5 6 7 8 9 10))",
+            &env,
+        );
+    }
+    let normal_duration = normal_start.elapsed().as_nanos() / 1000;
+
+    let callcc_start = Instant::now();
+    for _ in 0..1000 {
+        let _ = eval_str(
+            "(find-in-list (lambda (x) (= x 5)) '(1 2 3 4 5 6 7 8 9 10))",
+            &env,
+        );
+    }
+    let callcc_duration = callcc_start.elapsed().as_nanos() / 1000;
+
+    println!(
+        "  Normal recursion:     {}",
+        format_duration(normal_duration)
+    );
+    println!(
+        "  call/cc early exit:   {}",
+        format_duration(callcc_duration)
+    );
+    println!(
+        "  Overhead:             {:.2}x\n",
+        callcc_duration as f64 / normal_duration as f64
+    );
+
+    // ========================================================================
+    // SECTION 7: Recursive Functions
+    // ========================================================================
+    println!("┌─────────────────────────────────────────────────────────────┐");
+    println!("│ 7. RECURSIVE FUNCTIONS                                      │");
     println!("└─────────────────────────────────────────────────────────────┘\n");
 
     // Fibonacci (tree recursion)
@@ -316,10 +491,10 @@ fn main() {
     );
 
     // ========================================================================
-    // SECTION 7: Tail Call Optimization
+    // SECTION 8: Tail Call Optimization (CPS Implementation)
     // ========================================================================
     println!("┌─────────────────────────────────────────────────────────────┐");
-    println!("│ 7. TAIL CALL OPTIMIZATION                                   │");
+    println!("│ 8. TAIL CALL OPTIMIZATION (CPS)                             │");
     println!("└─────────────────────────────────────────────────────────────┘\n");
 
     // Tail-recursive countdown
@@ -334,24 +509,11 @@ fn main() {
         &env,
     );
 
-    println!("--- Countdown (Tail Recursion) ---");
+    println!("--- Countdown (Tail Recursion in CPS) ---");
     for size in [1000, 10000, 100000, 500000] {
         if let Ok(duration) = benchmark_single(
             &format!("countdown({})", size),
             &format!("(countdown {} 0)", size),
-            &env,
-        ) {
-            println!("    Duration: {}", format_duration(duration));
-        }
-    }
-    println!();
-
-    // Tail-recursive factorial (already defined above)
-    println!("--- Tail-Recursive Factorial ---");
-    for n in [10, 20] {
-        if let Ok(duration) = benchmark_single(
-            &format!("factorial-tail({})", n),
-            &format!("(factorial {} 1)", n),
             &env,
         ) {
             println!("    Duration: {}", format_duration(duration));
@@ -384,10 +546,10 @@ fn main() {
     println!();
 
     // ========================================================================
-    // SECTION 8: Higher-Order Functions
+    // SECTION 9: Higher-Order Functions
     // ========================================================================
     println!("┌─────────────────────────────────────────────────────────────┐");
-    println!("│ 8. HIGHER-ORDER FUNCTIONS                                   │");
+    println!("│ 9. HIGHER-ORDER FUNCTIONS                                   │");
     println!("└─────────────────────────────────────────────────────────────┘\n");
 
     // Map function
@@ -443,10 +605,85 @@ fn main() {
     benchmark_expression("composed function", "(composed 5)", &env, 50000);
 
     // ========================================================================
-    // SECTION 9: Complex Data Structures
+    // SECTION 10: CPS vs call/cc Patterns
     // ========================================================================
     println!("┌─────────────────────────────────────────────────────────────┐");
-    println!("│ 9. COMPLEX DATA STRUCTURES                                  │");
+    println!("│ 10. CPS vs call/cc CONTROL FLOW PATTERNS                   │");
+    println!("└─────────────────────────────────────────────────────────────┘\n");
+
+    // Manual CPS style (user-level)
+    let _ = eval_str_multiple(
+        r#"
+        (define identity-cps
+          (lambda (x k)
+            (k x)))
+        
+        (define add-cps
+          (lambda (a b k)
+            (k (+ a b))))
+        "#,
+        &env,
+    );
+
+    benchmark_expression(
+        "Manual CPS call",
+        "(identity-cps 42 (lambda (x) x))",
+        &env,
+        10000,
+    );
+
+    benchmark_expression(
+        "CPS with computation",
+        "(add-cps 10 20 (lambda (x) (* x 2)))",
+        &env,
+        10000,
+    );
+
+    // Compare with call/cc
+    benchmark_expression(
+        "call/cc equivalent",
+        "(call/cc (lambda (k) (k 42)))",
+        &env,
+        10000,
+    );
+
+    println!("--- Control Flow Overhead Analysis ---");
+
+    let direct_start = Instant::now();
+    for _ in 0..10000 {
+        let _ = eval_str("(+ 10 20)", &env);
+    }
+    let direct_time = direct_start.elapsed().as_nanos() / 10000;
+
+    let cps_start = Instant::now();
+    for _ in 0..10000 {
+        let _ = eval_str("(add-cps 10 20 (lambda (x) x))", &env);
+    }
+    let cps_time = cps_start.elapsed().as_nanos() / 10000;
+
+    let callcc_start = Instant::now();
+    for _ in 0..10000 {
+        let _ = eval_str("(call/cc (lambda (k) (k (+ 10 20))))", &env);
+    }
+    let callcc_time = callcc_start.elapsed().as_nanos() / 10000;
+
+    println!("  Direct computation:   {}", format_duration(direct_time));
+    println!(
+        "  Manual CPS style:     {} ({:.2}x overhead)",
+        format_duration(cps_time),
+        cps_time as f64 / direct_time as f64
+    );
+    println!(
+        "  call/cc style:        {} ({:.2}x overhead)\n",
+        format_duration(callcc_time),
+        callcc_time as f64 / direct_time as f64
+    );
+
+    // ========================================================================
+    // SECTION 11: Complex Data Structures
+    // ========================================================================
+    println!("┌─────────────────────────────────────────────────────────────┐");
+    println!("│ 11. COMPLEX DATA STRUCTURES                                 │");
     println!("└─────────────────────────────────────────────────────────────┘\n");
 
     // Build large list
@@ -483,104 +720,10 @@ fn main() {
     );
 
     // ========================================================================
-    // SECTION 10: Mutual Recursion
+    // SECTION 12: Performance Scaling Analysis
     // ========================================================================
     println!("┌─────────────────────────────────────────────────────────────┐");
-    println!("│ 10. MUTUAL RECURSION                                        │");
-    println!("└─────────────────────────────────────────────────────────────┘\n");
-
-    let _ = eval_str_multiple(
-        r#"
-        (define is-even
-          (lambda (n)
-            (if (= n 0)
-                #t
-                (is-odd (- n 1)))))
-        
-        (define is-odd
-          (lambda (n)
-            (if (= n 0)
-                #f
-                (is-even (- n 1)))))
-        "#,
-        &env,
-    );
-
-    println!("--- Even/Odd Test ---");
-    for n in [10, 100, 1000, 5000] {
-        if let Ok(duration) = benchmark_single(
-            &format!("is-even({})", n),
-            &format!("(is-even {})", n),
-            &env,
-        ) {
-            println!("    Duration: {}", format_duration(duration));
-        }
-    }
-    println!();
-
-    // ========================================================================
-    // SECTION 11: Expression Complexity
-    // ========================================================================
-    println!("┌─────────────────────────────────────────────────────────────┐");
-    println!("│ 11. EXPRESSION COMPLEXITY                                   │");
-    println!("└─────────────────────────────────────────────────────────────┘\n");
-
-    benchmark_expression(
-        "deeply nested expr",
-        "(+ (+ (+ (+ (+ 1 2) 3) 4) 5) 6)",
-        &env,
-        50000,
-    );
-
-    benchmark_expression("wide expr", "(+ 1 2 3 4 5 6 7 8 9 10)", &env, 50000);
-
-    benchmark_expression("mixed nesting", "(* (+ 2 3) (- 10 (/ 20 4)))", &env, 50000);
-
-    // ========================================================================
-    // SECTION 12: Real-World Patterns
-    // ========================================================================
-    println!("┌─────────────────────────────────────────────────────────────┐");
-    println!("│ 12. REAL-WORLD PATTERNS                                     │");
-    println!("└─────────────────────────────────────────────────────────────┘\n");
-
-    // Range function
-    let _ = eval_str_multiple(
-        r#"
-        (define range
-          (lambda (start end acc)
-            (if (> start end)
-                acc
-                (range (+ start 1) end (cons start acc)))))
-        "#,
-        &env,
-    );
-    benchmark_expression("range 1 10", "(reverse (range 1 10 nil))", &env, 10000);
-
-    // Take first n elements
-    let _ = eval_str_multiple(
-        r#"
-        (define take
-          (lambda (n lst)
-            (if (= n 0)
-                nil
-                (if (null? lst)
-                    nil
-                    (cons (car lst) (take (- n 1) (cdr lst)))))))
-        "#,
-        &env,
-    );
-    benchmark_expression(
-        "take 5 from list",
-        "(take 5 '(1 2 3 4 5 6 7 8 9 10))",
-        &env,
-        10000,
-    );
-
-    // ========================================================================
-    // SECTION 13: Performance Scaling Analysis
-    // ========================================================================
-    println!("┌─────────────────────────────────────────────────────────────┐");
-    println!("│ 13. PERFORMANCE SCALING ANALYSIS                            │");
+    println!("│ 12. PERFORMANCE SCALING ANALYSIS                            │");
     println!("└─────────────────────────────────────────────────────────────┘\n");
 
     println!("--- Fibonacci Scaling (O(φ^n)) ---");
@@ -588,7 +731,7 @@ fn main() {
     println!("{}", "-".repeat(40));
 
     let mut last_duration = 0u128;
-    for n in [5, 10, 15, 20, 30] {
+    for n in [5, 10, 15, 20, 25] {
         let start = Instant::now();
         let _ = eval_str(&format!("(fib {})", n), &env);
         let duration = start.elapsed().as_nanos();
@@ -610,7 +753,7 @@ fn main() {
     }
     println!();
 
-    println!("--- Tail Recursion Scaling (O(n)) ---");
+    println!("--- CPS Tail Recursion Scaling (O(n)) ---");
     println!("{:<15} | {:<15} | {:<10}", "Input", "Time", "Growth");
     println!("{}", "-".repeat(50));
 
@@ -638,10 +781,10 @@ fn main() {
     println!();
 
     // ========================================================================
-    // SECTION 14: Memory Stress Test
+    // SECTION 13: Memory & Allocation Stress
     // ========================================================================
     println!("┌─────────────────────────────────────────────────────────────┐");
-    println!("│ 14. MEMORY & ALLOCATION STRESS                              │");
+    println!("│ 13. MEMORY & ALLOCATION STRESS                              │");
     println!("└─────────────────────────────────────────────────────────────┘\n");
 
     println!("--- Repeated Large Allocations ---");
@@ -667,6 +810,17 @@ fn main() {
         format_duration(duration.as_nanos())
     );
 
+    println!("\n--- Repeated Continuation Capture ---");
+    let start = Instant::now();
+    for _ in 0..1000 {
+        let _ = eval_str("(call/cc (lambda (k) (k 42)))", &env);
+    }
+    let duration = start.elapsed();
+    println!(
+        "  1000 call/cc captures: {}",
+        format_duration(duration.as_nanos())
+    );
+
     // ========================================================================
     // Final Summary
     // ========================================================================
@@ -675,10 +829,11 @@ fn main() {
     println!("╚════════════════════════════════════════════════════════════╝");
 
     println!("\nKey Observations:");
-    println!("  • Tail call optimization enables deep recursion");
-    println!("  • Higher-order functions work efficiently with define");
+    println!("  • CPS implementation provides natural tail call optimization");
+    println!("  • call/cc enables powerful control flow patterns");
+    println!("  • Continuation capture has reasonable overhead");
+    println!("  • Early exits via call/cc faster than full traversals");
+    println!("  • Higher-order functions work efficiently");
     println!("  • Memory allocation patterns are stable");
-    println!("  • Closure creation is efficient");
     println!("  • Expression evaluation scales predictably");
-    println!("  • Define makes code much cleaner than self-application");
 }
