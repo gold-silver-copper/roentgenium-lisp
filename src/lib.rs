@@ -292,7 +292,7 @@ impl Value {
 // Environment Operations
 // ============================================================================
 
-fn env_new() -> ValRef {
+pub fn env_new() -> ValRef {
     let env = ValRef::cons(ValRef::nil(), ValRef::nil());
     register_builtins(&env);
     env
@@ -343,6 +343,42 @@ fn env_get(env: &ValRef, name: &str) -> Option<ValRef> {
             }
         }
         _ => None,
+    }
+}
+
+fn env_set_existing(env: &ValRef, name: &str, value: ValRef) -> Result<(), ()> {
+    match env.as_ref() {
+        Value::Cons(cell) => {
+            let (bindings, parent) = cell.borrow().clone();
+
+            let mut current = bindings;
+            loop {
+                match current.as_ref() {
+                    Value::Cons(binding_cell) => {
+                        let (binding, rest) = binding_cell.borrow().clone();
+                        if let Value::Cons(key_value_cell) = binding.as_ref() {
+                            let (key, _) = key_value_cell.borrow().clone();
+                            if let Value::Symbol(s) = key.as_ref() {
+                                if s.as_str() == name {
+                                    *key_value_cell.borrow_mut() = (key, value);
+                                    return Ok(());
+                                }
+                            }
+                        }
+                        current = rest;
+                    }
+                    Value::Nil => break,
+                    _ => break,
+                }
+            }
+
+            if !parent.is_nil() {
+                env_set_existing(&parent, name, value)
+            } else {
+                Err(())
+            }
+        }
+        _ => Err(()),
     }
 }
 
@@ -646,11 +682,33 @@ fn eval_step(expr: ValRef, env: &ValRef) -> Result<EvalResult, ValRef> {
                         env_set(env, name, val.clone());
                         return Ok(EvalResult::Done(val));
                     }
-                    "lambda" => {
+                    "set!" => {
                         let len = expr.as_ref().list_len();
                         if len != 3 {
+                            return Err(ValRef::symbol(String::from("set! requires 2 arguments")));
+                        }
+                        let name_val = expr
+                            .as_ref()
+                            .list_nth(1)
+                            .ok_or(ValRef::symbol(String::from("set! missing name")))?;
+                        let name = name_val.as_symbol().ok_or(ValRef::symbol(String::from(
+                            "set! requires symbol as first arg",
+                        )))?;
+                        let body_val = expr
+                            .as_ref()
+                            .list_nth(2)
+                            .ok_or(ValRef::symbol(String::from("set! missing value")))?;
+                        let val = eval(body_val, env)?;
+                        env_set_existing(env, name, val.clone())
+                            .map_err(|_| ValRef::symbol(String::from("set! unbound variable")))?;
+                        return Ok(EvalResult::Done(val));
+                    }
+
+                    "lambda" => {
+                        let len = expr.as_ref().list_len();
+                        if len < 3 {
                             return Err(ValRef::symbol(String::from(
-                                "lambda requires 2 arguments (params body)",
+                                "lambda requires at least 2 arguments (params body)",
                             )));
                         }
 
@@ -680,10 +738,25 @@ fn eval_step(expr: ValRef, env: &ValRef) -> Result<EvalResult, ValRef> {
                             }
                         }
 
-                        let body = expr
-                            .as_ref()
-                            .list_nth(2)
-                            .ok_or(ValRef::symbol(String::from("lambda missing body")))?;
+                        // Collect all body expressions
+                        let mut body_exprs = ValRef::nil();
+                        for i in (2..len).rev() {
+                            let expr_i = expr
+                                .as_ref()
+                                .list_nth(i)
+                                .ok_or(ValRef::symbol(String::from("lambda missing body expr")))?;
+                            body_exprs = ValRef::cons(expr_i, body_exprs);
+                        }
+
+                        // If multiple body expressions, wrap in begin
+                        let body = if len == 3 {
+                            expr.as_ref()
+                                .list_nth(2)
+                                .ok_or(ValRef::symbol(String::from("lambda missing body")))?
+                        } else {
+                            // Create (begin expr1 expr2 ...)
+                            ValRef::cons(ValRef::symbol(String::from("begin")), body_exprs)
+                        };
 
                         return Ok(EvalResult::Done(ValRef::lambda(
                             params_list,
@@ -691,6 +764,33 @@ fn eval_step(expr: ValRef, env: &ValRef) -> Result<EvalResult, ValRef> {
                             env.clone(),
                         )));
                     }
+                    "begin" => {
+                        let len = expr.as_ref().list_len();
+                        if len < 2 {
+                            return Err(ValRef::symbol(String::from(
+                                "begin requires at least 1 argument",
+                            )));
+                        }
+
+                        // Evaluate all expressions in sequence, return last
+                        let mut result = ValRef::nil();
+                        for i in 1..len {
+                            let expr_i = expr
+                                .as_ref()
+                                .list_nth(i)
+                                .ok_or(ValRef::symbol(String::from("begin missing expr")))?;
+
+                            // For the last expression, use tail call
+                            if i == len - 1 {
+                                return Ok(EvalResult::TailCall(expr_i, env.clone()));
+                            } else {
+                                result = eval(expr_i, env)?;
+                            }
+                        }
+
+                        return Ok(EvalResult::Done(result));
+                    }
+
                     "if" => {
                         let len = expr.as_ref().list_len();
                         if len != 4 {
