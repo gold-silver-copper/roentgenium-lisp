@@ -55,13 +55,11 @@ fn benchmark_expression(name: &str, expr: &str, env: &rlisp::ValRef, iterations:
 
 fn benchmark_single(name: &str, expr: &str, env: &rlisp::ValRef) -> Result<u128, String> {
     let start = Instant::now();
-    let result = eval_str(expr, env).map_err(|e| {
-        let mut buf = [0u8; 256];
-        e.to_display_str(&mut buf).unwrap().to_string()
-    })?;
+    let result = eval_str(expr, env).map_err(|e| e.to_display_str().unwrap().to_string())?;
     let duration = start.elapsed().as_nanos();
-    let mut buf = [0u8; 4096];
-    let result_str = result.to_display_str(&mut buf).unwrap_or("<display error>");
+    let result_str = result
+        .to_display_str()
+        .unwrap_or("<display error>".to_string());
     println!(
         "  {} = {} | Time: {}",
         name,

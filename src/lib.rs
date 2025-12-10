@@ -1,12 +1,14 @@
 #![no_std]
 
 extern crate alloc;
+use alloc::format;
 use alloc::rc::Rc;
+use alloc::string::{String, ToString};
 use core::cell::RefCell;
 use core::ops::Deref;
 
 // ============================================================================
-// Optimized Value Type - Everything is cons cells!
+// Optimized Value Type - Symbols use String
 // ============================================================================
 
 pub type BuiltinFn = fn(&ValRef) -> Result<ValRef, ValRef>;
@@ -14,15 +16,15 @@ pub type BuiltinFn = fn(&ValRef) -> Result<ValRef, ValRef>;
 #[derive(Clone)]
 pub enum Value {
     Number(i64),
-    Symbol(ValRef), // String as cons list of chars
+    Symbol(String),
     Bool(bool),
     Char(char),
-    Cons(Rc<RefCell<(ValRef, ValRef)>>), // Unified cons cell - always mutable
+    Cons(Rc<RefCell<(ValRef, ValRef)>>),
     Builtin(BuiltinFn),
     Lambda {
         params: ValRef,
         body: ValRef,
-        env: ValRef, // Environment is just a ValRef (cons list)
+        env: ValRef,
     },
     Nil,
 }
@@ -32,7 +34,7 @@ impl core::fmt::Debug for Value {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Value::Number(n) => write!(f, "Number({})", n),
-            Value::Symbol(_) => write!(f, "Symbol(...)"),
+            Value::Symbol(s) => write!(f, "Symbol({})", s),
             Value::Bool(b) => write!(f, "Bool({:?})", b),
             Value::Char(c) => write!(f, "Char({:?})", c),
             Value::Cons(_) => write!(f, "Cons(...)"),
@@ -49,7 +51,7 @@ impl core::fmt::Debug for Value {
 
 pub enum EvalResult {
     Done(ValRef),
-    TailCall(ValRef, ValRef), // expr, env (both ValRef)
+    TailCall(ValRef, ValRef),
 }
 
 // ============================================================================
@@ -64,23 +66,15 @@ impl ValRef {
         ValRef(Rc::new(value))
     }
 
-    pub fn to_display_str<'a>(&self, buf: &'a mut [u8]) -> Result<&'a str, ()> {
-        self.as_ref().to_display_str(buf)
+    pub fn to_display_str(&self) -> Result<String, ()> {
+        self.as_ref().to_display_str()
     }
 
     pub fn number(n: i64) -> Self {
         Self::new(Value::Number(n))
     }
 
-    pub fn new_str(s: &str) -> Self {
-        let mut result = ValRef::nil();
-        for ch in s.chars().rev() {
-            result = ValRef::cons(ValRef::char_val(ch), result);
-        }
-        result
-    }
-
-    pub fn symbol(s: ValRef) -> Self {
+    pub fn symbol(s: String) -> Self {
         Self::new(Value::Symbol(s))
     }
 
@@ -106,81 +100,6 @@ impl ValRef {
 
     pub fn nil() -> Self {
         Self::new(Value::Nil)
-    }
-
-    pub fn to_str_buf<'a>(&self, buf: &'a mut [u8]) -> Result<&'a str, ()> {
-        let mut idx = 0;
-        let mut current = self.clone();
-
-        loop {
-            match current.as_ref() {
-                Value::Char(ch) => {
-                    let mut char_buf = [0u8; 4];
-                    let char_str = ch.encode_utf8(&mut char_buf);
-                    let char_bytes = char_str.as_bytes();
-
-                    if idx + char_bytes.len() > buf.len() {
-                        return Err(());
-                    }
-
-                    for &byte in char_bytes {
-                        buf[idx] = byte;
-                        idx += 1;
-                    }
-                    break;
-                }
-                Value::Cons(cell) => {
-                    let (car, cdr) = cell.borrow().clone();
-                    if let Value::Char(ch) = car.as_ref() {
-                        let mut char_buf = [0u8; 4];
-                        let char_str = ch.encode_utf8(&mut char_buf);
-                        let char_bytes = char_str.as_bytes();
-
-                        if idx + char_bytes.len() > buf.len() {
-                            return Err(());
-                        }
-
-                        for &byte in char_bytes {
-                            buf[idx] = byte;
-                            idx += 1;
-                        }
-                        current = cdr;
-                    } else {
-                        return Err(());
-                    }
-                }
-                Value::Nil => break,
-                _ => return Err(()),
-            }
-        }
-
-        core::str::from_utf8(&buf[..idx]).map_err(|_| ())
-    }
-
-    pub fn str_eq(&self, other: &ValRef) -> bool {
-        let mut cur1 = self.clone();
-        let mut cur2 = other.clone();
-
-        loop {
-            match (cur1.as_ref(), cur2.as_ref()) {
-                (Value::Cons(cell1), Value::Cons(cell2)) => {
-                    let (c1, r1) = cell1.borrow().clone();
-                    let (c2, r2) = cell2.borrow().clone();
-                    if let (Value::Char(ch1), Value::Char(ch2)) = (c1.as_ref(), c2.as_ref()) {
-                        if ch1 != ch2 {
-                            return false;
-                        }
-                        cur1 = r1;
-                        cur2 = r2;
-                    } else {
-                        return false;
-                    }
-                }
-                (Value::Nil, Value::Nil) => return true,
-                (Value::Char(c1), Value::Char(c2)) => return c1 == c2,
-                _ => return false,
-            }
-        }
     }
 }
 
@@ -245,7 +164,7 @@ impl Value {
         }
     }
 
-    pub fn as_symbol(&self) -> Option<&ValRef> {
+    pub fn as_symbol(&self) -> Option<&String> {
         match self {
             Value::Symbol(s) => Some(s),
             _ => None,
@@ -281,127 +200,25 @@ impl Value {
         matches!(self, Value::Nil)
     }
 
-    pub fn to_display_str<'a>(&self, buf: &'a mut [u8]) -> Result<&'a str, ()> {
+    pub fn to_display_str(&self) -> Result<String, ()> {
         match self {
-            Value::Number(n) => {
-                let mut temp = [0u8; 32];
-                let mut idx = 0;
-                let mut num = *n;
-                let negative = num < 0;
-
-                if negative {
-                    num = -num;
-                }
-
-                if num == 0 {
-                    temp[idx] = b'0';
-                    idx += 1;
-                } else {
-                    let mut divisor = 1i64;
-                    let mut temp_num = num;
-                    while temp_num >= 10 {
-                        divisor *= 10;
-                        temp_num /= 10;
-                    }
-
-                    while divisor > 0 {
-                        let digit = (num / divisor) as u8;
-                        temp[idx] = b'0' + digit;
-                        idx += 1;
-                        num %= divisor;
-                        divisor /= 10;
-                    }
-                }
-
-                if negative {
-                    if idx + 1 > buf.len() {
-                        return Err(());
-                    }
-                    buf[0] = b'-';
-                    for i in 0..idx {
-                        buf[i + 1] = temp[i];
-                    }
-                    idx += 1;
-                } else {
-                    if idx > buf.len() {
-                        return Err(());
-                    }
-                    for i in 0..idx {
-                        buf[i] = temp[i];
-                    }
-                }
-
-                core::str::from_utf8(&buf[..idx]).map_err(|_| ())
-            }
-            Value::Symbol(s) => s.to_str_buf(buf),
-            Value::Bool(b) => {
-                let s = if *b { "#t" } else { "#f" };
-                let bytes = s.as_bytes();
-                if bytes.len() > buf.len() {
-                    return Err(());
-                }
-                for (i, &b) in bytes.iter().enumerate() {
-                    buf[i] = b;
-                }
-                core::str::from_utf8(&buf[..bytes.len()]).map_err(|_| ())
-            }
-            Value::Char(c) => {
-                let mut char_buf = [0u8; 4];
-                let s = c.encode_utf8(&mut char_buf);
-                let bytes = s.as_bytes();
-                if bytes.len() > buf.len() {
-                    return Err(());
-                }
-                for (i, &b) in bytes.iter().enumerate() {
-                    buf[i] = b;
-                }
-                core::str::from_utf8(&buf[..bytes.len()]).map_err(|_| ())
-            }
-            Value::Cons(_) => self.list_to_display_str(buf),
-            Value::Builtin(_) => {
-                let s = "<builtin>";
-                let bytes = s.as_bytes();
-                if bytes.len() > buf.len() {
-                    return Err(());
-                }
-                for (i, &b) in bytes.iter().enumerate() {
-                    buf[i] = b;
-                }
-                core::str::from_utf8(&buf[..bytes.len()]).map_err(|_| ())
-            }
-            Value::Lambda { .. } => {
-                let s = "<lambda>";
-                let bytes = s.as_bytes();
-                if bytes.len() > buf.len() {
-                    return Err(());
-                }
-                for (i, &b) in bytes.iter().enumerate() {
-                    buf[i] = b;
-                }
-                core::str::from_utf8(&buf[..bytes.len()]).map_err(|_| ())
-            }
-            Value::Nil => {
-                let s = "nil";
-                let bytes = s.as_bytes();
-                if bytes.len() > buf.len() {
-                    return Err(());
-                }
-                for (i, &b) in bytes.iter().enumerate() {
-                    buf[i] = b;
-                }
-                core::str::from_utf8(&buf[..bytes.len()]).map_err(|_| ())
-            }
+            Value::Number(n) => Ok(format!("{}", n)),
+            Value::Symbol(s) => Ok(s.clone()),
+            Value::Bool(b) => Ok(if *b {
+                String::from("#t")
+            } else {
+                String::from("#f")
+            }),
+            Value::Char(c) => Ok(c.to_string()),
+            Value::Cons(_) => self.list_to_display_str(),
+            Value::Builtin(_) => Ok(String::from("<builtin>")),
+            Value::Lambda { .. } => Ok(String::from("<lambda>")),
+            Value::Nil => Ok(String::from("nil")),
         }
     }
 
-    fn list_to_display_str<'a>(&self, buf: &'a mut [u8]) -> Result<&'a str, ()> {
-        let mut idx = 0;
-        if idx >= buf.len() {
-            return Err(());
-        }
-        buf[idx] = b'(';
-        idx += 1;
-
+    fn list_to_display_str(&self) -> Result<String, ()> {
+        let mut result = String::from("(");
         let mut current = ValRef::new(self.clone());
         let mut first = true;
 
@@ -410,49 +227,26 @@ impl Value {
                 Value::Cons(cell) => {
                     let (car, cdr) = cell.borrow().clone();
                     if !first {
-                        if idx >= buf.len() {
-                            return Err(());
-                        }
-                        buf[idx] = b' ';
-                        idx += 1;
+                        result.push(' ');
                     }
                     first = false;
 
-                    let item_str = car.as_ref().to_display_str(&mut buf[idx..])?;
-                    let item_len = item_str.len();
-                    idx += item_len;
-
+                    result.push_str(&car.as_ref().to_display_str()?);
                     current = cdr;
                 }
                 Value::Nil => break,
                 _ => {
                     if !first {
-                        if idx + 2 >= buf.len() {
-                            return Err(());
-                        }
-                        buf[idx] = b' ';
-                        idx += 1;
-                        buf[idx] = b'.';
-                        idx += 1;
-                        buf[idx] = b' ';
-                        idx += 1;
+                        result.push_str(" . ");
                     }
-
-                    let item_str = current.as_ref().to_display_str(&mut buf[idx..])?;
-                    let item_len = item_str.len();
-                    idx += item_len;
+                    result.push_str(&current.as_ref().to_display_str()?);
                     break;
                 }
             }
         }
 
-        if idx >= buf.len() {
-            return Err(());
-        }
-        buf[idx] = b')';
-        idx += 1;
-
-        core::str::from_utf8(&buf[..idx]).map_err(|_| ())
+        result.push(')');
+        Ok(result)
     }
 
     fn list_len(&self) -> usize {
@@ -495,12 +289,8 @@ impl Value {
 }
 
 // ============================================================================
-// Environment Operations - Mutable cons list manipulation
+// Environment Operations
 // ============================================================================
-
-/// Environment structure:
-/// Cons((bindings . parent_env))
-/// where bindings is a cons list of (symbol . value) pairs
 
 fn env_new() -> ValRef {
     let env = ValRef::cons(ValRef::nil(), ValRef::nil());
@@ -512,8 +302,7 @@ fn env_with_parent(parent: ValRef) -> ValRef {
     ValRef::cons(ValRef::nil(), parent)
 }
 
-fn env_set(env: &ValRef, name: ValRef, value: ValRef) {
-    // env is Cons(bindings, parent)
+fn env_set(env: &ValRef, name: String, value: ValRef) {
     if let Some(cell) = env.as_cons() {
         let (bindings, parent) = cell.borrow().clone();
         let new_binding = ValRef::cons(ValRef::symbol(name), value);
@@ -522,12 +311,11 @@ fn env_set(env: &ValRef, name: ValRef, value: ValRef) {
     }
 }
 
-fn env_get(env: &ValRef, name: &ValRef) -> Option<ValRef> {
+fn env_get(env: &ValRef, name: &str) -> Option<ValRef> {
     match env.as_ref() {
         Value::Cons(cell) => {
             let (bindings, parent) = cell.borrow().clone();
 
-            // Search in current bindings
             let mut current = bindings;
             loop {
                 match current.as_ref() {
@@ -536,7 +324,7 @@ fn env_get(env: &ValRef, name: &ValRef) -> Option<ValRef> {
                         if let Value::Cons(key_value_cell) = binding.as_ref() {
                             let (key, value) = key_value_cell.borrow().clone();
                             if let Value::Symbol(s) = key.as_ref() {
-                                if s.str_eq(name) {
+                                if s.as_str() == name {
                                     return Some(value);
                                 }
                             }
@@ -548,7 +336,6 @@ fn env_get(env: &ValRef, name: &ValRef) -> Option<ValRef> {
                 }
             }
 
-            // Search in parent
             if !parent.is_nil() {
                 env_get(&parent, name)
             } else {
@@ -560,41 +347,25 @@ fn env_get(env: &ValRef, name: &ValRef) -> Option<ValRef> {
 }
 
 fn register_builtins(env: &ValRef) {
-    env_set(env, ValRef::new_str("nil"), ValRef::nil());
-    env_set(env, ValRef::new_str("+"), ValRef::builtin(builtin_add));
-    env_set(env, ValRef::new_str("-"), ValRef::builtin(builtin_sub));
-    env_set(env, ValRef::new_str("*"), ValRef::builtin(builtin_mul));
-    env_set(env, ValRef::new_str("/"), ValRef::builtin(builtin_div));
-    env_set(env, ValRef::new_str("="), ValRef::builtin(builtin_eq));
-    env_set(env, ValRef::new_str("<"), ValRef::builtin(builtin_lt));
-    env_set(env, ValRef::new_str(">"), ValRef::builtin(builtin_gt));
-    env_set(env, ValRef::new_str("list"), ValRef::builtin(builtin_list));
-    env_set(env, ValRef::new_str("car"), ValRef::builtin(builtin_car));
-    env_set(env, ValRef::new_str("cdr"), ValRef::builtin(builtin_cdr));
+    env_set(env, String::from("nil"), ValRef::nil());
+    env_set(env, String::from("+"), ValRef::builtin(builtin_add));
+    env_set(env, String::from("-"), ValRef::builtin(builtin_sub));
+    env_set(env, String::from("*"), ValRef::builtin(builtin_mul));
+    env_set(env, String::from("/"), ValRef::builtin(builtin_div));
+    env_set(env, String::from("="), ValRef::builtin(builtin_eq));
+    env_set(env, String::from("<"), ValRef::builtin(builtin_lt));
+    env_set(env, String::from(">"), ValRef::builtin(builtin_gt));
+    env_set(env, String::from("list"), ValRef::builtin(builtin_list));
+    env_set(env, String::from("car"), ValRef::builtin(builtin_car));
+    env_set(env, String::from("cdr"), ValRef::builtin(builtin_cdr));
+    env_set(env, String::from("cons"), ValRef::builtin(builtin_cons_fn));
+    env_set(env, String::from("null?"), ValRef::builtin(builtin_null));
+    env_set(env, String::from("cons?"), ValRef::builtin(builtin_cons_p));
+    env_set(env, String::from("length"), ValRef::builtin(builtin_length));
+    env_set(env, String::from("append"), ValRef::builtin(builtin_append));
     env_set(
         env,
-        ValRef::new_str("cons"),
-        ValRef::builtin(builtin_cons_fn),
-    );
-    env_set(env, ValRef::new_str("null?"), ValRef::builtin(builtin_null));
-    env_set(
-        env,
-        ValRef::new_str("cons?"),
-        ValRef::builtin(builtin_cons_p),
-    );
-    env_set(
-        env,
-        ValRef::new_str("length"),
-        ValRef::builtin(builtin_length),
-    );
-    env_set(
-        env,
-        ValRef::new_str("append"),
-        ValRef::builtin(builtin_append),
-    );
-    env_set(
-        env,
-        ValRef::new_str("reverse"),
+        String::from("reverse"),
         ValRef::builtin(builtin_reverse),
     );
 }
@@ -656,15 +427,15 @@ fn tokenize(input: &str) -> Result<ValRef, ValRef> {
                 chars.next();
             }
             '(' => {
-                result = ValRef::cons(ValRef::symbol(ValRef::new_str("(")), result);
+                result = ValRef::cons(ValRef::symbol(String::from("(")), result);
                 chars.next();
             }
             ')' => {
-                result = ValRef::cons(ValRef::symbol(ValRef::new_str(")")), result);
+                result = ValRef::cons(ValRef::symbol(String::from(")")), result);
                 chars.next();
             }
             '\'' => {
-                result = ValRef::cons(ValRef::symbol(ValRef::new_str("'")), result);
+                result = ValRef::cons(ValRef::symbol(String::from("'")), result);
                 chars.next();
             }
             ';' => {
@@ -686,57 +457,27 @@ fn tokenize(input: &str) -> Result<ValRef, ValRef> {
                         result = ValRef::cons(ValRef::bool_val(false), result);
                         chars.next();
                     }
-                    _ => return Err(ValRef::new_str("Invalid boolean literal")),
+                    _ => return Err(ValRef::symbol(String::from("Invalid boolean literal"))),
                 }
             }
             _ => {
-                let mut atom_chars = ValRef::nil();
+                let mut atom = String::new();
                 while let Some(&c) = chars.peek() {
                     if c.is_whitespace() || c == '(' || c == ')' || c == '\'' {
                         break;
                     }
-                    atom_chars = ValRef::cons(ValRef::char_val(c), atom_chars);
+                    atom.push(c);
                     chars.next();
                 }
 
-                if atom_chars.is_nil() {
+                if atom.is_empty() {
                     continue;
                 }
 
-                atom_chars = reverse_list(atom_chars);
-
-                let mut buf = [0u8; 128];
-                let mut idx = 0;
-                let mut cur = atom_chars;
-                loop {
-                    match cur.as_ref() {
-                        Value::Cons(cell) => {
-                            let (car, cdr) = cell.borrow().clone();
-                            if let Value::Char(ch) = car.as_ref() {
-                                let mut char_buf = [0u8; 4];
-                                let s = ch.encode_utf8(&mut char_buf);
-                                for &b in s.as_bytes() {
-                                    if idx >= buf.len() {
-                                        return Err(ValRef::new_str("Atom too long"));
-                                    }
-                                    buf[idx] = b;
-                                    idx += 1;
-                                }
-                            }
-                            cur = cdr;
-                        }
-                        Value::Nil => break,
-                        _ => break,
-                    }
-                }
-
-                let atom_str = core::str::from_utf8(&buf[..idx])
-                    .map_err(|_| ValRef::new_str("Invalid UTF-8"))?;
-
-                if let Ok(num) = parse_i64(atom_str) {
+                if let Ok(num) = parse_i64(&atom) {
                     result = ValRef::cons(ValRef::number(num), result);
                 } else {
-                    result = ValRef::cons(ValRef::symbol(ValRef::new_str(atom_str)), result);
+                    result = ValRef::cons(ValRef::symbol(atom), result);
                 }
             }
         }
@@ -770,44 +511,37 @@ fn reverse_list(list: ValRef) -> ValRef {
 
 fn parse_tokens(tokens: ValRef) -> Result<(ValRef, ValRef), ValRef> {
     match tokens.as_ref() {
-        Value::Nil => Err(ValRef::new_str("Unexpected end of input")),
+        Value::Nil => Err(ValRef::symbol(String::from("Unexpected end of input"))),
         Value::Cons(cell) => {
             let (first, rest) = cell.borrow().clone();
             match first.as_ref() {
                 Value::Number(_) | Value::Bool(_) => Ok((first, rest)),
                 Value::Symbol(s) => {
-                    let mut buf = [0u8; 32];
-                    let s_str = s
-                        .to_str_buf(&mut buf)
-                        .map_err(|_| ValRef::new_str("Symbol too long"))?;
-
-                    if s_str == "'" {
+                    if s == "'" {
                         if let Value::Cons(next_cell) = rest.as_ref() {
                             let (next_expr, remaining) = next_cell.borrow().clone();
                             let (val, consumed) = parse_tokens(ValRef::cons(next_expr, remaining))?;
                             let quoted = ValRef::cons(
-                                ValRef::symbol(ValRef::new_str("quote")),
+                                ValRef::symbol(String::from("quote")),
                                 ValRef::cons(val, ValRef::nil()),
                             );
                             Ok((quoted, consumed))
                         } else {
-                            Err(ValRef::new_str("Quote requires an expression"))
+                            Err(ValRef::symbol(String::from("Quote requires an expression")))
                         }
-                    } else if s_str == "(" {
+                    } else if s == "(" {
                         let mut items = ValRef::nil();
                         let mut pos = rest;
 
                         loop {
                             match pos.as_ref() {
-                                Value::Nil => return Err(ValRef::new_str("Unmatched '('")),
+                                Value::Nil => {
+                                    return Err(ValRef::symbol(String::from("Unmatched '('")));
+                                }
                                 Value::Cons(token_cell) => {
                                     let (token, rest_tokens) = token_cell.borrow().clone();
                                     if let Value::Symbol(tok_s) = token.as_ref() {
-                                        let mut tok_buf = [0u8; 32];
-                                        let tok_str = tok_s
-                                            .to_str_buf(&mut tok_buf)
-                                            .map_err(|_| ValRef::new_str("Symbol too long"))?;
-                                        if tok_str == ")" {
+                                        if tok_s == ")" {
                                             return Ok((reverse_list(items), rest_tokens));
                                         }
                                     }
@@ -815,30 +549,36 @@ fn parse_tokens(tokens: ValRef) -> Result<(ValRef, ValRef), ValRef> {
                                     items = ValRef::cons(val, items);
                                     pos = consumed;
                                 }
-                                _ => return Err(ValRef::new_str("Invalid token stream")),
+                                _ => {
+                                    return Err(ValRef::symbol(String::from(
+                                        "Invalid token stream",
+                                    )));
+                                }
                             }
                         }
-                    } else if s_str == ")" {
-                        Err(ValRef::new_str("Unexpected ')'"))
+                    } else if s == ")" {
+                        Err(ValRef::symbol(String::from("Unexpected ')'")))
                     } else {
                         Ok((first, rest))
                     }
                 }
-                _ => Err(ValRef::new_str("Unexpected token type")),
+                _ => Err(ValRef::symbol(String::from("Unexpected token type"))),
             }
         }
-        _ => Err(ValRef::new_str("Invalid token stream")),
+        _ => Err(ValRef::symbol(String::from("Invalid token stream"))),
     }
 }
 
 pub fn parse(input: &str) -> Result<ValRef, ValRef> {
     let tokens = tokenize(input)?;
     if tokens.is_nil() {
-        return Err(ValRef::new_str("Empty input"));
+        return Err(ValRef::symbol(String::from("Empty input")));
     }
     let (val, remaining) = parse_tokens(tokens)?;
     if !remaining.is_nil() {
-        return Err(ValRef::new_str("Unexpected tokens after expression"));
+        return Err(ValRef::symbol(String::from(
+            "Unexpected tokens after expression",
+        )));
     }
     Ok(val)
 }
@@ -846,7 +586,7 @@ pub fn parse(input: &str) -> Result<ValRef, ValRef> {
 pub fn parse_multiple(input: &str) -> Result<ValRef, ValRef> {
     let tokens = tokenize(input)?;
     if tokens.is_nil() {
-        return Err(ValRef::new_str("Empty input"));
+        return Err(ValRef::symbol(String::from("Empty input")));
     }
 
     let mut expressions = ValRef::nil();
@@ -865,7 +605,7 @@ pub fn parse_multiple(input: &str) -> Result<ValRef, ValRef> {
 }
 
 // ============================================================================
-// Evaluator - With Proper Tail Call Optimization via Trampoline
+// Evaluator
 // ============================================================================
 
 fn eval_step(expr: ValRef, env: &ValRef) -> Result<EvalResult, ValRef> {
@@ -876,44 +616,38 @@ fn eval_step(expr: ValRef, env: &ValRef) -> Result<EvalResult, ValRef> {
         | Value::Builtin(_)
         | Value::Lambda { .. } => Ok(EvalResult::Done(expr.clone())),
         Value::Symbol(s) => {
-            let mut buf = [0u8; 32];
-            let s_str = s
-                .to_str_buf(&mut buf)
-                .map_err(|_| ValRef::new_str("Symbol too long"))?;
-
-            if s_str == "nil" {
+            if s == "nil" {
                 return Ok(EvalResult::Done(ValRef::nil()));
             }
             env_get(env, s)
                 .map(EvalResult::Done)
-                .ok_or_else(|| ValRef::new_str("Unbound symbol"))
+                .ok_or_else(|| ValRef::symbol(String::from("Unbound symbol")))
         }
         Value::Cons(cell) => {
             let (car, cdr) = cell.borrow().clone();
             if let Value::Symbol(sym) = car.as_ref() {
-                let mut buf = [0u8; 32];
-                let sym_str = sym
-                    .to_str_buf(&mut buf)
-                    .map_err(|_| ValRef::new_str("Symbol too long"))?;
-
-                match sym_str {
+                match sym.as_str() {
                     "define" => {
                         let len = expr.as_ref().list_len();
                         if len != 3 {
-                            return Err(ValRef::new_str("define requires 2 arguments"));
+                            return Err(ValRef::symbol(String::from(
+                                "define requires 2 arguments",
+                            )));
                         }
                         let name_val = expr
                             .as_ref()
                             .list_nth(1)
-                            .ok_or(ValRef::new_str("define missing name"))?;
+                            .ok_or(ValRef::symbol(String::from("define missing name")))?;
                         let name = name_val
                             .as_symbol()
-                            .ok_or(ValRef::new_str("define requires symbol as first arg"))?
+                            .ok_or(ValRef::symbol(String::from(
+                                "define requires symbol as first arg",
+                            )))?
                             .clone();
                         let body_val = expr
                             .as_ref()
                             .list_nth(2)
-                            .ok_or(ValRef::new_str("define missing body"))?;
+                            .ok_or(ValRef::symbol(String::from("define missing body")))?;
                         let val = eval(body_val, env)?;
                         env_set(env, name, val.clone());
                         return Ok(EvalResult::Done(val));
@@ -921,15 +655,15 @@ fn eval_step(expr: ValRef, env: &ValRef) -> Result<EvalResult, ValRef> {
                     "lambda" => {
                         let len = expr.as_ref().list_len();
                         if len != 3 {
-                            return Err(ValRef::new_str(
+                            return Err(ValRef::symbol(String::from(
                                 "lambda requires 2 arguments (params body)",
-                            ));
+                            )));
                         }
 
                         let params_list = expr
                             .as_ref()
                             .list_nth(1)
-                            .ok_or(ValRef::new_str("lambda missing params"))?;
+                            .ok_or(ValRef::symbol(String::from("lambda missing params")))?;
 
                         let mut current = params_list.clone();
                         loop {
@@ -937,21 +671,25 @@ fn eval_step(expr: ValRef, env: &ValRef) -> Result<EvalResult, ValRef> {
                                 Value::Cons(param_cell) => {
                                     let (param, rest) = param_cell.borrow().clone();
                                     if param.as_symbol().is_none() {
-                                        return Err(ValRef::new_str(
+                                        return Err(ValRef::symbol(String::from(
                                             "lambda params must be symbols",
-                                        ));
+                                        )));
                                     }
                                     current = rest;
                                 }
                                 Value::Nil => break,
-                                _ => return Err(ValRef::new_str("lambda params must be a list")),
+                                _ => {
+                                    return Err(ValRef::symbol(String::from(
+                                        "lambda params must be a list",
+                                    )));
+                                }
                             }
                         }
 
                         let body = expr
                             .as_ref()
                             .list_nth(2)
-                            .ok_or(ValRef::new_str("lambda missing body"))?;
+                            .ok_or(ValRef::symbol(String::from("lambda missing body")))?;
 
                         return Ok(EvalResult::Done(ValRef::lambda(
                             params_list,
@@ -962,12 +700,12 @@ fn eval_step(expr: ValRef, env: &ValRef) -> Result<EvalResult, ValRef> {
                     "if" => {
                         let len = expr.as_ref().list_len();
                         if len != 4 {
-                            return Err(ValRef::new_str("if requires 3 arguments"));
+                            return Err(ValRef::symbol(String::from("if requires 3 arguments")));
                         }
                         let cond_expr = expr
                             .as_ref()
                             .list_nth(1)
-                            .ok_or(ValRef::new_str("if missing condition"))?;
+                            .ok_or(ValRef::symbol(String::from("if missing condition")))?;
                         let cond = eval(cond_expr, env)?;
                         let is_true = match cond.as_ref() {
                             Value::Bool(b) => *b,
@@ -978,18 +716,18 @@ fn eval_step(expr: ValRef, env: &ValRef) -> Result<EvalResult, ValRef> {
                         let branch = expr
                             .as_ref()
                             .list_nth(branch_idx)
-                            .ok_or(ValRef::new_str("if missing branch"))?;
+                            .ok_or(ValRef::symbol(String::from("if missing branch")))?;
                         return Ok(EvalResult::TailCall(branch, env.clone()));
                     }
                     "quote" => {
                         let len = expr.as_ref().list_len();
                         if len != 2 {
-                            return Err(ValRef::new_str("quote requires 1 argument"));
+                            return Err(ValRef::symbol(String::from("quote requires 1 argument")));
                         }
                         let quoted = expr
                             .as_ref()
                             .list_nth(1)
-                            .ok_or(ValRef::new_str("quote missing argument"))?;
+                            .ok_or(ValRef::symbol(String::from("quote missing argument")))?;
                         return Ok(EvalResult::Done(quoted));
                     }
                     _ => {}
@@ -1009,7 +747,7 @@ fn eval_step(expr: ValRef, env: &ValRef) -> Result<EvalResult, ValRef> {
                         current = arg_cdr;
                     }
                     Value::Nil => break,
-                    _ => return Err(ValRef::new_str("Malformed argument list")),
+                    _ => return Err(ValRef::symbol(String::from("Malformed argument list"))),
                 }
             }
             args = reverse_list(args);
@@ -1025,7 +763,9 @@ fn eval_step(expr: ValRef, env: &ValRef) -> Result<EvalResult, ValRef> {
                     let arg_count = args.as_ref().list_len();
 
                     if arg_count != param_count {
-                        return Err(ValRef::new_str("Lambda argument count mismatch"));
+                        return Err(ValRef::symbol(String::from(
+                            "Lambda argument count mismatch",
+                        )));
                     }
 
                     let call_env = env_with_parent(lambda_env.clone());
@@ -1046,14 +786,16 @@ fn eval_step(expr: ValRef, env: &ValRef) -> Result<EvalResult, ValRef> {
                             }
                             (Value::Nil, Value::Nil) => break,
                             _ => {
-                                return Err(ValRef::new_str("Parameter/argument mismatch"));
+                                return Err(ValRef::symbol(String::from(
+                                    "Parameter/argument mismatch",
+                                )));
                             }
                         }
                     }
 
                     Ok(EvalResult::TailCall(body.clone(), call_env))
                 }
-                _ => Err(ValRef::new_str("Cannot call non-function")),
+                _ => Err(ValRef::symbol(String::from("Cannot call non-function"))),
             }
         }
         Value::Nil => Ok(EvalResult::Done(ValRef::nil())),
@@ -1088,14 +830,14 @@ fn builtin_add(args: &ValRef) -> Result<ValRef, ValRef> {
                 let (car, cdr) = cell.borrow().clone();
                 let num = car
                     .as_number()
-                    .ok_or(ValRef::new_str("+ requires numbers"))?;
+                    .ok_or(ValRef::symbol(String::from("+ requires numbers")))?;
                 result = result
                     .checked_add(num)
-                    .ok_or(ValRef::new_str("Integer overflow"))?;
+                    .ok_or(ValRef::symbol(String::from("Integer overflow")))?;
                 current = cdr;
             }
             Value::Nil => break,
-            _ => return Err(ValRef::new_str("Invalid argument list")),
+            _ => return Err(ValRef::symbol(String::from("Invalid argument list"))),
         }
     }
 
@@ -1105,22 +847,24 @@ fn builtin_add(args: &ValRef) -> Result<ValRef, ValRef> {
 fn builtin_sub(args: &ValRef) -> Result<ValRef, ValRef> {
     let len = args.as_ref().list_len();
     if len == 0 {
-        return Err(ValRef::new_str("- requires at least 1 argument"));
+        return Err(ValRef::symbol(String::from(
+            "- requires at least 1 argument",
+        )));
     }
 
     let first = args
         .as_ref()
         .list_nth(0)
-        .ok_or(ValRef::new_str("- missing first argument"))?;
+        .ok_or(ValRef::symbol(String::from("- missing first argument")))?;
     let first_num = first
         .as_number()
-        .ok_or(ValRef::new_str("- requires numbers"))?;
+        .ok_or(ValRef::symbol(String::from("- requires numbers")))?;
 
     if len == 1 {
         return Ok(ValRef::number(
             first_num
                 .checked_neg()
-                .ok_or(ValRef::new_str("Integer overflow"))?,
+                .ok_or(ValRef::symbol(String::from("Integer overflow")))?,
         ));
     }
 
@@ -1137,14 +881,14 @@ fn builtin_sub(args: &ValRef) -> Result<ValRef, ValRef> {
                 let (car, cdr) = cell.borrow().clone();
                 let num = car
                     .as_number()
-                    .ok_or(ValRef::new_str("- requires numbers"))?;
+                    .ok_or(ValRef::symbol(String::from("- requires numbers")))?;
                 result = result
                     .checked_sub(num)
-                    .ok_or(ValRef::new_str("Integer overflow"))?;
+                    .ok_or(ValRef::symbol(String::from("Integer overflow")))?;
                 current = cdr;
             }
             Value::Nil => break,
-            _ => return Err(ValRef::new_str("Invalid argument list")),
+            _ => return Err(ValRef::symbol(String::from("Invalid argument list"))),
         }
     }
 
@@ -1161,14 +905,14 @@ fn builtin_mul(args: &ValRef) -> Result<ValRef, ValRef> {
                 let (car, cdr) = cell.borrow().clone();
                 let num = car
                     .as_number()
-                    .ok_or(ValRef::new_str("* requires numbers"))?;
+                    .ok_or(ValRef::symbol(String::from("* requires numbers")))?;
                 result = result
                     .checked_mul(num)
-                    .ok_or(ValRef::new_str("Integer overflow"))?;
+                    .ok_or(ValRef::symbol(String::from("Integer overflow")))?;
                 current = cdr;
             }
             Value::Nil => break,
-            _ => return Err(ValRef::new_str("Invalid argument list")),
+            _ => return Err(ValRef::symbol(String::from("Invalid argument list"))),
         }
     }
 
@@ -1178,16 +922,18 @@ fn builtin_mul(args: &ValRef) -> Result<ValRef, ValRef> {
 fn builtin_div(args: &ValRef) -> Result<ValRef, ValRef> {
     let len = args.as_ref().list_len();
     if len < 2 {
-        return Err(ValRef::new_str("/ requires at least 2 arguments"));
+        return Err(ValRef::symbol(String::from(
+            "/ requires at least 2 arguments",
+        )));
     }
 
     let first = args
         .as_ref()
         .list_nth(0)
-        .ok_or(ValRef::new_str("/ missing first argument"))?;
+        .ok_or(ValRef::symbol(String::from("/ missing first argument")))?;
     let mut result = first
         .as_number()
-        .ok_or(ValRef::new_str("/ requires numbers"))?;
+        .ok_or(ValRef::symbol(String::from("/ requires numbers")))?;
 
     let mut current = args.clone();
     if let Value::Cons(cell) = current.as_ref() {
@@ -1201,17 +947,17 @@ fn builtin_div(args: &ValRef) -> Result<ValRef, ValRef> {
                 let (car, cdr) = cell.borrow().clone();
                 let num = car
                     .as_number()
-                    .ok_or(ValRef::new_str("/ requires numbers"))?;
+                    .ok_or(ValRef::symbol(String::from("/ requires numbers")))?;
                 if num == 0 {
-                    return Err(ValRef::new_str("Division by zero"));
+                    return Err(ValRef::symbol(String::from("Division by zero")));
                 }
                 result = result
                     .checked_div(num)
-                    .ok_or(ValRef::new_str("Integer overflow"))?;
+                    .ok_or(ValRef::symbol(String::from("Integer overflow")))?;
                 current = cdr;
             }
             Value::Nil => break,
-            _ => return Err(ValRef::new_str("Invalid argument list")),
+            _ => return Err(ValRef::symbol(String::from("Invalid argument list"))),
         }
     }
 
@@ -1220,52 +966,64 @@ fn builtin_div(args: &ValRef) -> Result<ValRef, ValRef> {
 
 fn builtin_eq(args: &ValRef) -> Result<ValRef, ValRef> {
     if args.as_ref().list_len() != 2 {
-        return Err(ValRef::new_str("= requires 2 arguments"));
+        return Err(ValRef::symbol(String::from("= requires 2 arguments")));
     }
     let a = args
         .as_ref()
         .list_nth(0)
-        .ok_or(ValRef::new_str("= missing arg 1"))?;
+        .ok_or(ValRef::symbol(String::from("= missing arg 1")))?;
     let b = args
         .as_ref()
         .list_nth(1)
-        .ok_or(ValRef::new_str("= missing arg 2"))?;
-    let a_num = a.as_number().ok_or(ValRef::new_str("= requires numbers"))?;
-    let b_num = b.as_number().ok_or(ValRef::new_str("= requires numbers"))?;
+        .ok_or(ValRef::symbol(String::from("= missing arg 2")))?;
+    let a_num = a
+        .as_number()
+        .ok_or(ValRef::symbol(String::from("= requires numbers")))?;
+    let b_num = b
+        .as_number()
+        .ok_or(ValRef::symbol(String::from("= requires numbers")))?;
     Ok(ValRef::bool_val(a_num == b_num))
 }
 
 fn builtin_lt(args: &ValRef) -> Result<ValRef, ValRef> {
     if args.as_ref().list_len() != 2 {
-        return Err(ValRef::new_str("< requires 2 arguments"));
+        return Err(ValRef::symbol(String::from("< requires 2 arguments")));
     }
     let a = args
         .as_ref()
         .list_nth(0)
-        .ok_or(ValRef::new_str("< missing arg 1"))?;
+        .ok_or(ValRef::symbol(String::from("< missing arg 1")))?;
     let b = args
         .as_ref()
         .list_nth(1)
-        .ok_or(ValRef::new_str("< missing arg 2"))?;
-    let a_num = a.as_number().ok_or(ValRef::new_str("< requires numbers"))?;
-    let b_num = b.as_number().ok_or(ValRef::new_str("< requires numbers"))?;
+        .ok_or(ValRef::symbol(String::from("< missing arg 2")))?;
+    let a_num = a
+        .as_number()
+        .ok_or(ValRef::symbol(String::from("< requires numbers")))?;
+    let b_num = b
+        .as_number()
+        .ok_or(ValRef::symbol(String::from("< requires numbers")))?;
     Ok(ValRef::bool_val(a_num < b_num))
 }
 
 fn builtin_gt(args: &ValRef) -> Result<ValRef, ValRef> {
     if args.as_ref().list_len() != 2 {
-        return Err(ValRef::new_str("> requires 2 arguments"));
+        return Err(ValRef::symbol(String::from("> requires 2 arguments")));
     }
     let a = args
         .as_ref()
         .list_nth(0)
-        .ok_or(ValRef::new_str("> missing arg 1"))?;
+        .ok_or(ValRef::symbol(String::from("> missing arg 1")))?;
     let b = args
         .as_ref()
         .list_nth(1)
-        .ok_or(ValRef::new_str("> missing arg 2"))?;
-    let a_num = a.as_number().ok_or(ValRef::new_str("> requires numbers"))?;
-    let b_num = b.as_number().ok_or(ValRef::new_str("> requires numbers"))?;
+        .ok_or(ValRef::symbol(String::from("> missing arg 2")))?;
+    let a_num = a
+        .as_number()
+        .ok_or(ValRef::symbol(String::from("> requires numbers")))?;
+    let b_num = b
+        .as_number()
+        .ok_or(ValRef::symbol(String::from("> requires numbers")))?;
     Ok(ValRef::bool_val(a_num > b_num))
 }
 
@@ -1275,79 +1033,79 @@ fn builtin_list(args: &ValRef) -> Result<ValRef, ValRef> {
 
 fn builtin_car(args: &ValRef) -> Result<ValRef, ValRef> {
     if args.as_ref().list_len() != 1 {
-        return Err(ValRef::new_str("car requires 1 argument"));
+        return Err(ValRef::symbol(String::from("car requires 1 argument")));
     }
     let list = args
         .as_ref()
         .list_nth(0)
-        .ok_or(ValRef::new_str("car missing argument"))?;
+        .ok_or(ValRef::symbol(String::from("car missing argument")))?;
     let cell = list
         .as_cons()
-        .ok_or(ValRef::new_str("car requires a cons/list"))?;
+        .ok_or(ValRef::symbol(String::from("car requires a cons/list")))?;
     let (car, _) = cell.borrow().clone();
     Ok(car)
 }
 
 fn builtin_cdr(args: &ValRef) -> Result<ValRef, ValRef> {
     if args.as_ref().list_len() != 1 {
-        return Err(ValRef::new_str("cdr requires 1 argument"));
+        return Err(ValRef::symbol(String::from("cdr requires 1 argument")));
     }
     let list = args
         .as_ref()
         .list_nth(0)
-        .ok_or(ValRef::new_str("cdr missing argument"))?;
+        .ok_or(ValRef::symbol(String::from("cdr missing argument")))?;
     let cell = list
         .as_cons()
-        .ok_or(ValRef::new_str("cdr requires a cons/list"))?;
+        .ok_or(ValRef::symbol(String::from("cdr requires a cons/list")))?;
     let (_, cdr) = cell.borrow().clone();
     Ok(cdr)
 }
 
 fn builtin_cons_fn(args: &ValRef) -> Result<ValRef, ValRef> {
     if args.as_ref().list_len() != 2 {
-        return Err(ValRef::new_str("cons requires 2 arguments"));
+        return Err(ValRef::symbol(String::from("cons requires 2 arguments")));
     }
     let car = args
         .as_ref()
         .list_nth(0)
-        .ok_or(ValRef::new_str("cons missing arg 1"))?;
+        .ok_or(ValRef::symbol(String::from("cons missing arg 1")))?;
     let cdr = args
         .as_ref()
         .list_nth(1)
-        .ok_or(ValRef::new_str("cons missing arg 2"))?;
+        .ok_or(ValRef::symbol(String::from("cons missing arg 2")))?;
     Ok(ValRef::cons(car, cdr))
 }
 
 fn builtin_null(args: &ValRef) -> Result<ValRef, ValRef> {
     if args.as_ref().list_len() != 1 {
-        return Err(ValRef::new_str("null? requires 1 argument"));
+        return Err(ValRef::symbol(String::from("null? requires 1 argument")));
     }
     let val = args
         .as_ref()
         .list_nth(0)
-        .ok_or(ValRef::new_str("null? missing argument"))?;
+        .ok_or(ValRef::symbol(String::from("null? missing argument")))?;
     Ok(ValRef::bool_val(val.is_nil()))
 }
 
 fn builtin_cons_p(args: &ValRef) -> Result<ValRef, ValRef> {
     if args.as_ref().list_len() != 1 {
-        return Err(ValRef::new_str("cons? requires 1 argument"));
+        return Err(ValRef::symbol(String::from("cons? requires 1 argument")));
     }
     let val = args
         .as_ref()
         .list_nth(0)
-        .ok_or(ValRef::new_str("cons? missing argument"))?;
+        .ok_or(ValRef::symbol(String::from("cons? missing argument")))?;
     Ok(ValRef::bool_val(val.as_cons().is_some()))
 }
 
 fn builtin_length(args: &ValRef) -> Result<ValRef, ValRef> {
     if args.as_ref().list_len() != 1 {
-        return Err(ValRef::new_str("length requires 1 argument"));
+        return Err(ValRef::symbol(String::from("length requires 1 argument")));
     }
     let list = args
         .as_ref()
         .list_nth(0)
-        .ok_or(ValRef::new_str("length missing argument"))?;
+        .ok_or(ValRef::symbol(String::from("length missing argument")))?;
     let len = list.as_ref().list_len();
     Ok(ValRef::number(len as i64))
 }
@@ -1375,7 +1133,7 @@ fn builtin_append(args: &ValRef) -> Result<ValRef, ValRef> {
                 current = rest;
             }
             Value::Nil => break,
-            _ => return Err(ValRef::new_str("Invalid argument list")),
+            _ => return Err(ValRef::symbol(String::from("Invalid argument list"))),
         }
     }
 
@@ -1384,12 +1142,12 @@ fn builtin_append(args: &ValRef) -> Result<ValRef, ValRef> {
 
 fn builtin_reverse(args: &ValRef) -> Result<ValRef, ValRef> {
     if args.as_ref().list_len() != 1 {
-        return Err(ValRef::new_str("reverse requires 1 argument"));
+        return Err(ValRef::symbol(String::from("reverse requires 1 argument")));
     }
     let list = args
         .as_ref()
         .list_nth(0)
-        .ok_or(ValRef::new_str("reverse missing argument"))?;
+        .ok_or(ValRef::symbol(String::from("reverse missing argument")))?;
     Ok(reverse_list(list))
 }
 
@@ -1406,7 +1164,7 @@ pub fn eval_str(input: &str, env: &ValRef) -> Result<ValRef, ValRef> {
 pub fn eval_str_multiple(input: &str, env: &ValRef) -> Result<ValRef, ValRef> {
     let expressions = parse_multiple(input)?;
     if expressions.is_nil() {
-        return Err(ValRef::new_str("No expressions to evaluate"));
+        return Err(ValRef::symbol(String::from("No expressions to evaluate")));
     }
 
     let mut last_result = ValRef::nil();
@@ -1420,7 +1178,7 @@ pub fn eval_str_multiple(input: &str, env: &ValRef) -> Result<ValRef, ValRef> {
                 current = rest;
             }
             Value::Nil => break,
-            _ => return Err(ValRef::new_str("Invalid expression list")),
+            _ => return Err(ValRef::symbol(String::from("Invalid expression list"))),
         }
     }
 
@@ -1433,7 +1191,7 @@ impl PartialEq for ValRef {
             (Value::Number(a), Value::Number(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Char(a), Value::Char(b)) => a == b,
-            (Value::Symbol(a), Value::Symbol(b)) => a.str_eq(b),
+            (Value::Symbol(a), Value::Symbol(b)) => a == b,
             (Value::Nil, Value::Nil) => true,
             (Value::Cons(a_cell), Value::Cons(b_cell)) => {
                 let (a_car, a_cdr) = a_cell.borrow().clone();
@@ -1458,7 +1216,6 @@ impl PartialEq for ValRef {
     }
 }
 
-// Public function to create new environment
 pub fn new_env() -> ValRef {
     env_new()
 }
