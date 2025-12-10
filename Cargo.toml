@@ -1,0 +1,11 @@
+[package]
+name = "roentgenium-lisp"
+version = "0.1.0"
+edition = "2024"
+# This makes it a library
+[lib]
+name = "rlisp"  # Name of the library (optional, defaults to package name)
+crate-type = ["lib"]  # Can also include "cdylib", "staticlib", etc. as needed
+# path = "src/lib.rs"  # Optional: custom path to lib file (defaults to src/lib.rs)
+
+[dependencies]
