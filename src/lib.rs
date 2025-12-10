@@ -40,7 +40,7 @@ impl core::fmt::Debug for Value {
             Value::Cons(_) => write!(f, "Cons(...)"),
             Value::Builtin(_) => write!(f, "Builtin(<fn>)"),
             Value::Lambda { .. } => write!(f, "Lambda(<fn>)"),
-            Value::Nil => write!(f, "Nil"),
+            Value::Nil => write!(f, "()"),
         }
     }
 }
@@ -139,7 +139,7 @@ impl Value {
             Value::Cons(_) => "cons",
             Value::Builtin(_) => "builtin",
             Value::Lambda { .. } => "lambda",
-            Value::Nil => "nil",
+            Value::Nil => "empty-list",
         }
     }
 
@@ -213,7 +213,7 @@ impl Value {
             Value::Cons(_) => self.list_to_display_str(),
             Value::Builtin(_) => Ok(String::from("<builtin>")),
             Value::Lambda { .. } => Ok(String::from("<lambda>")),
-            Value::Nil => Ok(String::from("nil")),
+            Value::Nil => Ok(String::from("()")),
         }
     }
 
@@ -347,7 +347,6 @@ fn env_get(env: &ValRef, name: &str) -> Option<ValRef> {
 }
 
 fn register_builtins(env: &ValRef) {
-    env_set(env, String::from("nil"), ValRef::nil());
     env_set(env, String::from("+"), ValRef::builtin(builtin_add));
     env_set(env, String::from("-"), ValRef::builtin(builtin_sub));
     env_set(env, String::from("*"), ValRef::builtin(builtin_mul));
@@ -615,14 +614,9 @@ fn eval_step(expr: ValRef, env: &ValRef) -> Result<EvalResult, ValRef> {
         | Value::Char(_)
         | Value::Builtin(_)
         | Value::Lambda { .. } => Ok(EvalResult::Done(expr.clone())),
-        Value::Symbol(s) => {
-            if s == "nil" {
-                return Ok(EvalResult::Done(ValRef::nil()));
-            }
-            env_get(env, s)
-                .map(EvalResult::Done)
-                .ok_or_else(|| ValRef::symbol(String::from("Unbound symbol")))
-        }
+        Value::Symbol(s) => env_get(env, s)
+            .map(EvalResult::Done)
+            .ok_or_else(|| ValRef::symbol(String::from("Unbound symbol"))),
         Value::Cons(cell) => {
             let (car, cdr) = cell.borrow().clone();
             if let Value::Symbol(sym) = car.as_ref() {

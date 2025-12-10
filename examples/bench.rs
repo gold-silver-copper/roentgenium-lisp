@@ -588,7 +588,7 @@ fn main() {
     println!("{}", "-".repeat(40));
 
     let mut last_duration = 0u128;
-    for n in [5, 10, 15, 20, 23] {
+    for n in [5, 10, 15, 20, 30] {
         let start = Instant::now();
         let _ = eval_str(&format!("(fib {})", n), &env);
         let duration = start.elapsed().as_nanos();
