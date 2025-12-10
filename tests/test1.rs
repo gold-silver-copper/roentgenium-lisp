@@ -18,14 +18,12 @@ use rlisp::*;
 // ============================================================================
 
 fn eval_code(code: &str) -> Result<ValRef, ValRef> {
-    let env = env_new();
-    let expr = parse(code)?;
-    eval(expr, &env)
+    let env = new_env();
+    eval_str(code, &env)
 }
 
 fn eval_with_env(code: &str, env: &ValRef) -> Result<ValRef, ValRef> {
-    let expr = parse(code)?;
-    eval(expr, env)
+    eval_str(code, env)
 }
 
 fn assert_number(val: &ValRef, expected: i64) {
@@ -56,7 +54,7 @@ fn list_nth(val: &ValRef, n: usize) -> Option<ValRef> {
 
 #[test]
 fn test_set_basic_mutation() {
-    let env = env_new();
+    let env = new_env();
     eval_with_env("(define x 10)", &env).unwrap();
     eval_with_env("(set! x 20)", &env).unwrap();
 
@@ -66,7 +64,7 @@ fn test_set_basic_mutation() {
 
 #[test]
 fn test_set_returns_new_value() {
-    let env = env_new();
+    let env = new_env();
     eval_with_env("(define x 10)", &env).unwrap();
     let result = eval_with_env("(set! x 42)", &env).unwrap();
 
@@ -75,14 +73,14 @@ fn test_set_returns_new_value() {
 
 #[test]
 fn test_set_unbound_variable_fails() {
-    let env = env_new();
+    let env = new_env();
     let result = eval_with_env("(set! nonexistent 123)", &env);
     assert!(result.is_err());
 }
 
 #[test]
 fn test_set_with_expression() {
-    let env = env_new();
+    let env = new_env();
     eval_with_env("(define x 10)", &env).unwrap();
     eval_with_env("(define y 5)", &env).unwrap();
     eval_with_env("(set! x (+ y 15))", &env).unwrap();
@@ -93,7 +91,7 @@ fn test_set_with_expression() {
 
 #[test]
 fn test_set_multiple_mutations() {
-    let env = env_new();
+    let env = new_env();
     eval_with_env("(define counter 0)", &env).unwrap();
 
     eval_with_env("(set! counter (+ counter 1))", &env).unwrap();
@@ -111,7 +109,7 @@ fn test_set_multiple_mutations() {
 
 #[test]
 fn test_set_in_lambda_closure() {
-    let env = env_new();
+    let env = new_env();
 
     let code = r#"
         (define make-counter
@@ -136,7 +134,7 @@ fn test_set_in_lambda_closure() {
 
 #[test]
 fn test_set_independent_closures() {
-    let env = env_new();
+    let env = new_env();
 
     let code = r#"
         (define make-counter
@@ -168,7 +166,7 @@ fn test_set_independent_closures() {
 
 #[test]
 fn test_set_in_nested_scope() {
-    let env = env_new();
+    let env = new_env();
     eval_with_env("(define x 10)", &env).unwrap();
 
     let code = r#"
@@ -185,7 +183,7 @@ fn test_set_in_nested_scope() {
 
 #[test]
 fn test_set_shadowed_variable() {
-    let env = env_new();
+    let env = new_env();
     eval_with_env("(define x 10)", &env).unwrap();
 
     let code = r#"
@@ -206,7 +204,7 @@ fn test_set_shadowed_variable() {
 
 #[test]
 fn test_set_boolean_value() {
-    let env = env_new();
+    let env = new_env();
     eval_with_env("(define flag #t)", &env).unwrap();
 
     let result = eval_with_env("flag", &env).unwrap();
@@ -219,7 +217,7 @@ fn test_set_boolean_value() {
 
 #[test]
 fn test_set_list_value() {
-    let env = env_new();
+    let env = new_env();
     eval_with_env("(define mylist (list 1 2 3))", &env).unwrap();
     eval_with_env("(set! mylist (list 4 5 6))", &env).unwrap();
 
@@ -229,7 +227,7 @@ fn test_set_list_value() {
 
 #[test]
 fn test_set_wrong_argument_count() {
-    let env = env_new();
+    let env = new_env();
     eval_with_env("(define x 10)", &env).unwrap();
 
     // Too few arguments
@@ -241,7 +239,7 @@ fn test_set_wrong_argument_count() {
 
 #[test]
 fn test_set_non_symbol_first_arg() {
-    let env = env_new();
+    let env = new_env();
 
     assert!(eval_with_env("(set! 123 456)", &env).is_err());
     assert!(eval_with_env("(set! (+ 1 2) 10)", &env).is_err());
@@ -249,7 +247,7 @@ fn test_set_non_symbol_first_arg() {
 
 #[test]
 fn test_set_preserves_other_bindings() {
-    let env = env_new();
+    let env = new_env();
     eval_with_env("(define x 10)", &env).unwrap();
     eval_with_env("(define y 20)", &env).unwrap();
     eval_with_env("(define z 30)", &env).unwrap();
@@ -267,7 +265,7 @@ fn test_set_preserves_other_bindings() {
 
 #[test]
 fn test_set_bank_account_example() {
-    let env = env_new();
+    let env = new_env();
 
     let code = r#"
         (define make-account
@@ -291,7 +289,7 @@ fn test_set_bank_account_example() {
 
 #[test]
 fn test_set_parent_scope() {
-    let env = env_new();
+    let env = new_env();
     eval_with_env("(define x 100)", &env).unwrap();
     eval_with_env(
         "(define mutate-x (lambda (new-val) (set! x new-val)))",
@@ -306,7 +304,7 @@ fn test_set_parent_scope() {
 
 #[test]
 fn test_set_vs_define_shadowing() {
-    let env = env_new();
+    let env = new_env();
     eval_with_env("(define x 10)", &env).unwrap();
 
     let code = r#"
@@ -327,7 +325,7 @@ fn test_set_vs_define_shadowing() {
 
 #[test]
 fn test_set_finds_first_binding_in_chain() {
-    let env = env_new();
+    let env = new_env();
     eval_with_env("(define x 1)", &env).unwrap();
     eval_with_env(
         "(define outer (lambda () (define x 2) (define inner (lambda () (set! x 99))) (inner) x))",
@@ -344,7 +342,7 @@ fn test_set_finds_first_binding_in_chain() {
 
 #[test]
 fn test_set_accumulator_pattern() {
-    let env = env_new();
+    let env = new_env();
     eval_with_env("(define sum 0)", &env).unwrap();
     eval_with_env(
         "(define add-to-sum (lambda (n) (set! sum (+ sum n)) sum))",
@@ -364,7 +362,7 @@ fn test_set_accumulator_pattern() {
 
 #[test]
 fn test_set_swap_pattern() {
-    let env = env_new();
+    let env = new_env();
     eval_with_env("(define a 10)", &env).unwrap();
     eval_with_env("(define b 20)", &env).unwrap();
     eval_with_env("(define temp a)", &env).unwrap();
@@ -380,7 +378,7 @@ fn test_set_swap_pattern() {
 
 #[test]
 fn test_set_in_recursive_function() {
-    let env = env_new();
+    let env = new_env();
     eval_with_env("(define call-count 0)", &env).unwrap();
     eval_with_env(
         "(define counting-factorial (lambda (n) (set! call-count (+ call-count 1)) (if (= n 0) 1 (* n (counting-factorial (- n 1))))))",
@@ -395,7 +393,7 @@ fn test_set_in_recursive_function() {
 
 #[test]
 fn test_set_with_lambda_value() {
-    let env = env_new();
+    let env = new_env();
     eval_with_env("(define func (lambda (x) x))", &env).unwrap();
     eval_with_env("(set! func (lambda (x) (* x 2)))", &env).unwrap();
 
@@ -405,7 +403,7 @@ fn test_set_with_lambda_value() {
 
 #[test]
 fn test_set_multiple_variables_in_sequence() {
-    let env = env_new();
+    let env = new_env();
     eval_with_env("(define a 1)", &env).unwrap();
     eval_with_env("(define b 2)", &env).unwrap();
     eval_with_env("(define c 3)", &env).unwrap();
@@ -420,7 +418,7 @@ fn test_set_multiple_variables_in_sequence() {
 
 #[test]
 fn test_set_state_machine() {
-    let env = env_new();
+    let env = new_env();
     eval_with_env("(define state 0)", &env).unwrap();
     eval_with_env(
         "(define toggle (lambda () (if (= state 0) (set! state 1) (set! state 0)) state))",
@@ -507,7 +505,7 @@ fn test_if_expression() {
 
 #[test]
 fn test_quote() {
-    let env = env_new();
+    let env = new_env();
     let result = eval_with_env("'(1 2 3)", &env).unwrap();
 
     // Verify it's a list
@@ -522,7 +520,7 @@ fn test_quote() {
 
 #[test]
 fn test_define_and_lookup() {
-    let env = env_new();
+    let env = new_env();
     eval_with_env("(define x 42)", &env).unwrap();
     let result = eval_with_env("x", &env).unwrap();
     assert_number(&result, 42);
@@ -546,7 +544,7 @@ fn test_lambda_application() {
 
 #[test]
 fn test_lambda_closure() {
-    let env = env_new();
+    let env = new_env();
     eval_with_env(
         "(define make-adder (lambda (n) (lambda (x) (+ x n))))",
         &env,
@@ -564,7 +562,7 @@ fn test_lambda_closure() {
 
 #[test]
 fn test_list_operations() {
-    let env = env_new();
+    let env = new_env();
 
     eval_with_env("(define mylist (list 1 2 3 4))", &env).unwrap();
 
@@ -592,7 +590,7 @@ fn test_list_operations() {
 
 #[test]
 fn test_cons_operations() {
-    let env = env_new();
+    let env = new_env();
 
     let result = eval_with_env("(cons 1 (cons 2 (cons 3 ())))", &env).unwrap();
 
@@ -614,7 +612,7 @@ fn test_cons_operations() {
 
 #[test]
 fn test_recursive_factorial() {
-    let env = env_new();
+    let env = new_env();
 
     let factorial_def = r#"
         (define factorial
@@ -635,7 +633,7 @@ fn test_recursive_factorial() {
 
 #[test]
 fn test_tail_recursive_sum() {
-    let env = env_new();
+    let env = new_env();
 
     let sum_def = r#"
         (define sum
@@ -657,7 +655,7 @@ fn test_tail_recursive_sum() {
 
 #[test]
 fn test_append() {
-    let env = env_new();
+    let env = new_env();
 
     let result = eval_with_env("(append (list 1 2) (list 3 4))", &env).unwrap();
     let car = eval_with_env("(car (append (list 1 2) (list 3 4)))", &env).unwrap();
@@ -669,7 +667,7 @@ fn test_append() {
 
 #[test]
 fn test_reverse() {
-    let env = env_new();
+    let env = new_env();
 
     let result = eval_with_env("(reverse (list 1 2 3))", &env).unwrap();
     let car = eval_with_env("(car (reverse (list 1 2 3)))", &env).unwrap();
@@ -725,7 +723,7 @@ fn test_type_error_in_arithmetic() {
 
 #[test]
 fn test_simple_tail_recursion() {
-    let env = env_new();
+    let env = new_env();
 
     eval_with_env(
         r#"
@@ -745,7 +743,7 @@ fn test_simple_tail_recursion() {
 
 #[test]
 fn test_deep_tail_recursion() {
-    let env = env_new();
+    let env = new_env();
 
     eval_with_env(
         r#"
@@ -765,7 +763,7 @@ fn test_deep_tail_recursion() {
 
 #[test]
 fn test_factorial_tail_recursive() {
-    let env = env_new();
+    let env = new_env();
 
     eval_with_env(
         r#"
@@ -785,7 +783,7 @@ fn test_factorial_tail_recursive() {
 
 #[test]
 fn test_very_deep_recursion() {
-    let env = env_new();
+    let env = new_env();
 
     eval_with_env(
         r#"
@@ -810,7 +808,7 @@ fn test_very_deep_recursion() {
 
 #[test]
 fn test_higher_order_functions() {
-    let env = env_new();
+    let env = new_env();
 
     let code = r#"
         (define map
@@ -843,7 +841,7 @@ fn test_higher_order_functions() {
 
 #[test]
 fn test_y_combinator() {
-    let env = env_new();
+    let env = new_env();
 
     let y_comb = r#"
         (define Y
@@ -871,7 +869,7 @@ fn test_y_combinator() {
 
 #[test]
 fn test_lexical_scoping() {
-    let env = env_new();
+    let env = new_env();
 
     eval_with_env("(define x 10)", &env).unwrap();
     eval_with_env(
@@ -896,30 +894,14 @@ fn test_parse_multiple_expressions() {
         (+ x y)
     "#;
 
-    let env = env_new();
-    let exprs = parse_multiple(code).unwrap();
-
-    let mut result = ValRef::nil();
-    let mut current = exprs;
-
-    loop {
-        match current.as_ref() {
-            Value::Cons(cell) => {
-                let (expr, rest) = cell.borrow().clone();
-                result = eval(expr, &env).unwrap();
-                current = rest;
-            }
-            Value::Nil => break,
-            _ => panic!("Invalid expression list"),
-        }
-    }
-
+    let env = new_env();
+    let result = eval_str_multiple(code, &env).unwrap();
     assert_number(&result, 3);
 }
 
 #[test]
 fn test_fibonacci_tree_recursion() {
-    let env = env_new();
+    let env = new_env();
 
     eval_with_env(
         r#"
@@ -942,7 +924,7 @@ fn test_fibonacci_tree_recursion() {
 
 #[test]
 fn test_mutual_recursion() {
-    let env = env_new();
+    let env = new_env();
 
     eval_with_env(
         r#"
@@ -980,7 +962,7 @@ fn test_mutual_recursion() {
 
 #[test]
 fn test_ackermann_function() {
-    let env = env_new();
+    let env = new_env();
 
     eval_with_env(
         r#"
@@ -1005,7 +987,7 @@ fn test_ackermann_function() {
 
 #[test]
 fn test_filter_function() {
-    let env = env_new();
+    let env = new_env();
 
     eval_with_env(
         r#"
@@ -1037,7 +1019,7 @@ fn test_filter_function() {
 
 #[test]
 fn test_compose_function() {
-    let env = env_new();
+    let env = new_env();
 
     eval_with_env(
         r#"
@@ -1059,7 +1041,7 @@ fn test_compose_function() {
 
 #[test]
 fn test_list_building() {
-    let env = env_new();
+    let env = new_env();
 
     eval_with_env(
         r#"
@@ -1082,7 +1064,7 @@ fn test_list_building() {
 
 #[test]
 fn test_nested_lambdas() {
-    let env = env_new();
+    let env = new_env();
 
     let result = eval_with_env("((lambda (x) ((lambda (y) (+ x y)) 10)) 5)", &env).unwrap();
     assert_number(&result, 15);
@@ -1090,7 +1072,7 @@ fn test_nested_lambdas() {
 
 #[test]
 fn test_fold_operations() {
-    let env = env_new();
+    let env = new_env();
 
     eval_with_env(
         r#"
@@ -1119,7 +1101,7 @@ fn test_fold_operations() {
 
 #[test]
 fn test_deeply_nested_data_structures() {
-    let env = env_new();
+    let env = new_env();
 
     eval_with_env(
         r#"
@@ -1155,7 +1137,7 @@ fn test_deeply_nested_data_structures() {
 
 #[test]
 fn test_alternating_recursion_patterns() {
-    let env = env_new();
+    let env = new_env();
 
     eval_with_env(
         r#"
@@ -1180,7 +1162,7 @@ fn test_alternating_recursion_patterns() {
 
 #[test]
 fn test_complex_computation() {
-    let env = env_new();
+    let env = new_env();
 
     eval_with_env(
         r#"
@@ -1200,7 +1182,7 @@ fn test_complex_computation() {
 
 #[test]
 fn test_nested_closure_chains() {
-    let env = env_new();
+    let env = new_env();
 
     eval_with_env(
         r#"
@@ -1222,7 +1204,7 @@ fn test_nested_closure_chains() {
 
 #[test]
 fn test_repeated_environment_modifications() {
-    let env = env_new();
+    let env = new_env();
 
     // Define many variables
     for i in 0..50 {
@@ -1243,7 +1225,7 @@ fn test_repeated_environment_modifications() {
 
 #[test]
 fn test_begin_sequencing() {
-    let env = env_new();
+    let env = new_env();
 
     eval_with_env("(define x 0)", &env).unwrap();
 
@@ -1256,7 +1238,7 @@ fn test_begin_sequencing() {
 
 #[test]
 fn test_lambda_with_begin_body() {
-    let env = env_new();
+    let env = new_env();
 
     let code = r#"
         (define test
@@ -1273,7 +1255,7 @@ fn test_lambda_with_begin_body() {
 
 #[test]
 fn test_massive_list_operations() {
-    let env = env_new();
+    let env = new_env();
 
     eval_with_env(
         r#"
@@ -1294,7 +1276,7 @@ fn test_massive_list_operations() {
 
 #[test]
 fn test_count_down_loop() {
-    let env = env_new();
+    let env = new_env();
 
     eval_with_env(
         r#"
