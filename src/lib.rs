@@ -18,7 +18,6 @@ pub enum Value {
     Number(i64),
     Symbol(String),
     Bool(bool),
-    Char(char),
     Cons(Rc<RefCell<(ValRef, ValRef)>>),
     Builtin(BuiltinFn),
     Lambda {
@@ -36,7 +35,6 @@ impl core::fmt::Debug for Value {
             Value::Number(n) => write!(f, "Number({})", n),
             Value::Symbol(s) => write!(f, "Symbol({})", s),
             Value::Bool(b) => write!(f, "Bool({:?})", b),
-            Value::Char(c) => write!(f, "Char({:?})", c),
             Value::Cons(_) => write!(f, "Cons(...)"),
             Value::Builtin(_) => write!(f, "Builtin(<fn>)"),
             Value::Lambda { .. } => write!(f, "Lambda(<fn>)"),
@@ -80,10 +78,6 @@ impl ValRef {
 
     pub fn bool_val(b: bool) -> Self {
         Self::new(Value::Bool(b))
-    }
-
-    pub fn char_val(c: char) -> Self {
-        Self::new(Value::Char(c))
     }
 
     pub fn cons(car: ValRef, cdr: ValRef) -> Self {
@@ -135,7 +129,6 @@ impl Value {
             Value::Number(_) => "number",
             Value::Symbol(_) => "symbol",
             Value::Bool(_) => "bool",
-            Value::Char(_) => "char",
             Value::Cons(_) => "cons",
             Value::Builtin(_) => "builtin",
             Value::Lambda { .. } => "lambda",
@@ -153,13 +146,6 @@ impl Value {
     pub fn as_number(&self) -> Option<i64> {
         match self {
             Value::Number(n) => Some(*n),
-            _ => None,
-        }
-    }
-
-    pub fn as_char(&self) -> Option<char> {
-        match self {
-            Value::Char(c) => Some(*c),
             _ => None,
         }
     }
@@ -209,7 +195,6 @@ impl Value {
             } else {
                 String::from("#f")
             }),
-            Value::Char(c) => Ok(c.to_string()),
             Value::Cons(_) => self.list_to_display_str(),
             Value::Builtin(_) => Ok(String::from("<builtin>")),
             Value::Lambda { .. } => Ok(String::from("<lambda>")),
@@ -645,11 +630,9 @@ pub fn parse_multiple(input: &str) -> Result<ValRef, ValRef> {
 
 fn eval_step(expr: ValRef, env: &ValRef) -> Result<EvalResult, ValRef> {
     match expr.as_ref() {
-        Value::Number(_)
-        | Value::Bool(_)
-        | Value::Char(_)
-        | Value::Builtin(_)
-        | Value::Lambda { .. } => Ok(EvalResult::Done(expr.clone())),
+        Value::Number(_) | Value::Bool(_) | Value::Builtin(_) | Value::Lambda { .. } => {
+            Ok(EvalResult::Done(expr.clone()))
+        }
         Value::Symbol(s) => env_get(env, s)
             .map(EvalResult::Done)
             .ok_or_else(|| ValRef::symbol(String::from("Unbound symbol"))),
@@ -1284,7 +1267,6 @@ impl PartialEq for ValRef {
         match (self.as_ref(), other.as_ref()) {
             (Value::Number(a), Value::Number(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
-            (Value::Char(a), Value::Char(b)) => a == b,
             (Value::Symbol(a), Value::Symbol(b)) => a == b,
             (Value::Nil, Value::Nil) => true,
             (Value::Cons(a_cell), Value::Cons(b_cell)) => {
